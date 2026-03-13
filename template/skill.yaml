@@ -1,0 +1,12 @@
+id: <skill-name>
+name: <Human-Readable Name>
+category: coordination
+summary: <one-line description>
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.1.0"
+public_status: staging
+owners:
+  - kiloloop

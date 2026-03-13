@@ -1,0 +1,104 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions: {}
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          pip install pyyaml
+          npm install -g markdownlint-cli
+
+      - name: Lint Markdown files
+        run: markdownlint '**/*.md' --ignore node_modules
+
+      - name: Validate skill.yaml frontmatter
+        run: |
+          python3 - << 'PYEOF'
+          import yaml
+          import glob
+          import sys
+
+          REQUIRED_FIELDS = ["id", "name", "category", "summary", "license",
+                             "compatible_runtimes", "requires_oacp", "public_status", "owners"]
+
+          errors = []
+          for path in sorted(glob.glob("skills/*/skill.yaml")):
+              with open(path) as f:
+                  try:
+                      data = yaml.safe_load(f)
+                  except yaml.YAMLError as e:
+                      errors.append(f"{path}: invalid YAML — {e}")
+                      continue
+                  if not isinstance(data, dict):
+                      errors.append(f"{path}: expected a mapping, got {type(data).__name__}")
+                      continue
+                  for field in REQUIRED_FIELDS:
+                      if field not in data:
+                          errors.append(f"{path}: missing required field '{field}'")
+
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {e}", file=sys.stderr)
+              sys.exit(1)
+          else:
+              print(f"All skill.yaml files valid.")
+          PYEOF
+
+      - name: Validate SKILL.md frontmatter
+        run: |
+          python3 - << 'PYEOF'
+          import glob
+          import sys
+
+          errors = []
+          for path in sorted(glob.glob("skills/*/claude/SKILL.md") + glob.glob("skills/*/codex/SKILL.md")):
+              with open(path) as f:
+                  content = f.read()
+              if not content.startswith("---"):
+                  errors.append(f"{path}: missing YAML frontmatter (must start with ---)")
+                  continue
+              parts = content.split("---", 2)
+              if len(parts) < 3:
+                  errors.append(f"{path}: malformed frontmatter (missing closing ---)")
+                  continue
+              import yaml
+              try:
+                  fm = yaml.safe_load(parts[1])
+              except yaml.YAMLError as e:
+                  errors.append(f"{path}: invalid frontmatter YAML — {e}")
+                  continue
+              if not isinstance(fm, dict):
+                  errors.append(f"{path}: frontmatter must be a mapping")
+                  continue
+              for field in ["name", "description"]:
+                  if field not in fm:
+                      errors.append(f"{path}: frontmatter missing '{field}'")
+
+          if errors:
+              for e in errors:
+                  print(f"ERROR: {e}", file=sys.stderr)
+              sys.exit(1)
+          else:
+              print(f"All SKILL.md frontmatter valid.")
+          PYEOF
+
+      - name: Check for absolute paths
+        run: |
+          if grep -rn '/Users/' skills/ template/ 2>/dev/null; then
+            echo "ERROR: Found absolute paths — replace with \$HOME or \$OACP_HOME"
+            exit 1
+          fi
+          echo "No absolute paths found."
