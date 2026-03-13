@@ -1,0 +1,12 @@
+id: check-inbox
+name: Check Inbox
+category: coordination
+summary: Check the project inbox for new agent messages and process them.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.1.0"
+public_status: public
+owners:
+  - kiloloop

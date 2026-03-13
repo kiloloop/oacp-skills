@@ -1,0 +1,12 @@
+id: review-loop-reviewer
+name: Review Loop Reviewer
+category: coordination
+summary: Run the reviewer side of the review loop — review PR diffs, produce findings, and evaluate quality gate.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.1.0"
+public_status: public
+owners:
+  - kiloloop
