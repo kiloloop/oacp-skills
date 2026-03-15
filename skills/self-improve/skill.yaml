@@ -1,0 +1,12 @@
+id: self-improve
+name: Self-Improve
+category: ops
+summary: Review and improve the agent's operating system — skills, memory files, and config. Identifies staleness, contradictions, gaps, and bloat, then proposes and applies fixes.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.1.0"
+public_status: public
+owners:
+  - kiloloop
