@@ -15,6 +15,7 @@ Reusable skills for AI coding agents coordinating over the [Open Agent Coordinat
 | [check-inbox](skills/check-inbox/) | Scan OACP inbox for agent messages and auto-act on them | Continuous or on-demand inbox polling in multi-agent workflows |
 | [review-loop-reviewer](skills/review-loop-reviewer/) | Review PR diffs, produce structured findings, emit verdict | Agent acting as code reviewer on a PR |
 | [review-loop-author](skills/review-loop-author/) | Address review findings, push fixes, drive to LGTM | Agent authoring a PR that is under review |
+| [self-improve](skills/self-improve/) | Audit skills, memory, and config for drift, gaps, and contradictions | Maintaining an agent's operating system over time |
 
 ## Prerequisites
 
@@ -38,13 +39,13 @@ cp skills/<skill-name>/codex/SKILL.md .agents/skills/<skill-name>/SKILL.md
 
 ## How These Skills Work Together
 
-These three skills form a complete agent-to-agent code review loop over OACP:
+Three of these skills form a complete agent-to-agent code review loop over OACP:
 
 1. **check-inbox** monitors each agent's inbox for incoming messages (review requests, feedback, task assignments).
 2. When a review request arrives, the reviewer agent runs **review-loop-reviewer** to analyze the PR diff and send structured findings back.
 3. The author agent picks up the findings via **review-loop-author**, applies fixes, and sends a `review_addressed` message — closing the loop.
 
-Each skill is independent and useful on its own, but together they enable fully autonomous multi-round code review between agents.
+The fourth skill, **self-improve**, is complementary maintenance tooling for auditing skill instructions, memory files, and config drift outside the review loop.
 
 ## Directory Structure
 
