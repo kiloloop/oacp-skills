@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-03-22
+
+### Added
+
+- `doctor` skill — environment and workspace diagnostics with auto-fix
+- [skills.sh](https://skills.sh) compatibility — top-level `SKILL.md` files for standard discovery, `claude/SKILL.md` symlinks to top level
+- Promote workflow for staging → public sync
+
+### Changed
+
+- README rewritten with per-skill sections, usage examples, and install guide
+- Installation options reordered: skills.sh (Claude Code) → copy → symlink (devs only)
+- Removed `runtime` frontmatter field from skill SKILL.md files
+- Cleaned stale AHS references
+
 ## [0.1.0] - 2026-03-16
 
 ### Added
@@ -19,5 +34,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill template for contributing new skills
 - CI validation workflow (skill.yaml schema, SKILL.md frontmatter, absolute path check)
 
-[Unreleased]: https://github.com/kiloloop/oacp-skills/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kiloloop/oacp-skills/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kiloloop/oacp-skills/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kiloloop/oacp-skills/releases/tag/v0.1.0

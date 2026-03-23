@@ -1,0 +1,113 @@
+name: Promote to Public
+
+on:
+  push:
+    tags:
+      - "v[0-9]*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Preview diff only — do not create a PR on the public repo"
+        required: false
+        default: "false"
+        type: choice
+        options:
+          - "false"
+          - "true"
+
+permissions: {}
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate App token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.KILOLOOP_CLAUDE_APP_ID }}
+          private-key: ${{ secrets.KILOLOOP_CLAUDE_PRIVATE_KEY }}
+          owner: kiloloop
+          repositories: oacp-skills
+
+      - name: Export clean snapshot
+        run: |
+          mkdir -p /tmp/export
+          git archive HEAD \
+            skills/ template/ \
+            CONTRIBUTING.md README.md LICENSE \
+            .gitattributes .markdownlint.json \
+            .github/workflows/validate.yml \
+            | tar -x -C /tmp/export
+
+      - name: Clone public repo
+        run: |
+          git clone "https://x-access-token:${{ steps.app-token.outputs.token }}@github.com/kiloloop/oacp-skills.git" /tmp/public
+
+      - name: Sync content
+        run: |
+          cd /tmp/public
+          # Remove old content (preserve .git, .gitignore)
+          find . -maxdepth 1 \
+            ! -name '.' ! -name '.git' ! -name '.gitignore' \
+            -exec rm -rf {} +
+
+          # Copy exported content
+          cp -R /tmp/export/* /tmp/public/
+          cp -R /tmp/export/.gitattributes /tmp/public/ 2>/dev/null || true
+          cp -R /tmp/export/.markdownlint.json /tmp/public/ 2>/dev/null || true
+          mkdir -p /tmp/public/.github/workflows
+          cp /tmp/export/.github/workflows/validate.yml /tmp/public/.github/workflows/ 2>/dev/null || true
+
+      - name: Check for changes
+        id: check
+        run: |
+          cd /tmp/public
+          if git diff --quiet && [ -z "$(git ls-files --others --exclude-standard)" ]; then
+            echo "No changes to promote."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+            echo "## Changes to promote" >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            git diff --stat >> "$GITHUB_STEP_SUMMARY"
+            git status --short >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Create PR on public repo
+        if: steps.check.outputs.has_changes == 'true' && github.event.inputs.dry_run != 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          cd /tmp/public
+          git config user.name "kiloloop-claude[bot]"
+          git config user.email "3044264+kiloloop-claude[bot]@users.noreply.github.com"
+
+          TAG="${GITHUB_REF_NAME:-manual}"
+          BRANCH="promote/${TAG}"
+          git checkout -b "$BRANCH"
+          git add -A
+          git commit -m "chore: promote skills snapshot ${TAG}"
+          git push origin "$BRANCH"
+
+          gh pr create \
+            --repo kiloloop/oacp-skills \
+            --title "chore: promote skills snapshot ${TAG}" \
+            --body "$(cat <<EOF
+          ## Promoted from staging
+
+          Source: \`kiloloop/oacp-skills-staging\` @ \`${TAG}\`
+
+          Review the diff below. Merge when ready to publish.
+
+          ---
+          *Automated by [promote workflow](https://github.com/kiloloop/oacp-skills-staging/actions).*
+          EOF
+          )"

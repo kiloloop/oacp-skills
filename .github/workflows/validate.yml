@@ -86,6 +86,10 @@ jobs:
               for field in ["name", "description"]:
                   if field not in fm:
                       errors.append(f"{path}: frontmatter missing '{field}'")
+              ALLOWED_FIELDS = {"name", "description"}
+              for key in fm:
+                  if key not in ALLOWED_FIELDS:
+                      errors.append(f"{path}: disallowed frontmatter field '{key}' (only name, description allowed)")
 
           if errors:
               for e in errors:

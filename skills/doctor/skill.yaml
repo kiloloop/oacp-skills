@@ -1,0 +1,12 @@
+id: doctor
+name: Doctor
+category: ops
+summary: Run environment and workspace diagnostics, surface issues, and auto-fix what it can.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.1.2"
+public_status: staging
+owners:
+  - kiloloop

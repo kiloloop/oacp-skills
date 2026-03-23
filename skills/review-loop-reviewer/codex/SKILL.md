@@ -1,7 +1,6 @@
 ---
 name: review-loop-reviewer
 description: Run the reviewer side of the review loop — review PR diffs, produce findings, and evaluate quality gate.
-runtime: codex
 ---
 
 # /review-loop-reviewer

@@ -1,7 +1,6 @@
 ---
 name: review-loop-author
 description: Run the author side of the review loop — address findings and drive to LGTM.
-runtime: codex
 ---
 
 # /review-loop-author
