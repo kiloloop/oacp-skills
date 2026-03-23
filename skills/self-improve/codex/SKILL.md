@@ -1,7 +1,6 @@
 ---
 name: self-improve
 description: Review and improve the agent's operating system — skills, memory files, and AGENTS.md configs. Identifies staleness, contradictions, gaps, and bloat, then proposes and applies fixes.
-runtime: codex
 ---
 
 # /self-improve

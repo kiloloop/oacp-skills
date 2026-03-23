@@ -1,7 +1,6 @@
 ---
 name: check-inbox
 description: Process the current Codex inbox in a single ordered pass.
-runtime: codex
 ---
 
 # /check-inbox
