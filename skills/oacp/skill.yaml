@@ -1,0 +1,12 @@
+id: oacp
+name: OACP
+category: coordination
+summary: Use the OACP CLI and protocol to coordinate multi-agent work — send messages, watch inboxes, run review loops.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.3.0"
+public_status: staging
+owners:
+  - kiloloop
