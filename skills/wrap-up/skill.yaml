@@ -1,0 +1,12 @@
+id: wrap-up
+name: Wrap-Up
+category: ops
+summary: End-of-session cleanup, optional debrief, self-improve, commit, and push in one command.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.3.0"
+public_status: staging
+owners:
+  - kiloloop
