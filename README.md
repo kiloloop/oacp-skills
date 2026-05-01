@@ -98,6 +98,20 @@ oacp doctor --project myproject --fix        # auto-fix safe issues
 oacp doctor --project myproject --fix --json # structured output
 ```
 
+---
+
+### [wrap-up](skills/wrap-up/)
+
+End-of-session cleanup in one command. 8-step sequence: cleanup stale artifacts → optional debrief → org-memory event capture → `/self-improve` → commit current repo → optional OACP memory sync → pull-rebase + push → summary. Hard dependency on `/self-improve`; optional integrations with `/debrief` and the `oacp` CLI (≥0.3.0).
+
+**Runtimes:** Claude Code, Codex
+
+```bash
+# Claude Code
+/wrap-up            # full sequence
+/wrap-up --dry-run  # cleanup + debrief + self-improve only; skip commit, push, memory sync
+```
+
 ## How These Skills Work Together
 
 The **oacp** skill teaches a runtime how to use the OACP CLI and protocol — it's the foundation the workflow skills build on. The next three form a complete agent-to-agent code review loop:

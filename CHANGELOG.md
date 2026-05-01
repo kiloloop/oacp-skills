@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] - 2026-05-01
+
+### Added
+
+- `wrap-up` skill — end-of-session cleanup, optional debrief, self-improve, commit, and push in one command. 8-step sequence: cleanup → debrief → org-memory → self-improve → commit → memory-sync → push → summary. Hard dependency on `/self-improve` skill; optional integrations with `/debrief` and the `oacp` CLI (≥0.3.0). Both Claude Code and Codex runtimes.
+- Top-level README "wrap-up" entry under the Skills section.
+
 ## [0.3.0] - 2026-04-30
 
 ### Added
@@ -44,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill template for contributing new skills
 - CI validation workflow (skill.yaml schema, SKILL.md frontmatter, absolute path check)
 
+[0.4.0]: https://github.com/kiloloop/oacp-skills/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kiloloop/oacp-skills/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kiloloop/oacp-skills/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/kiloloop/oacp-skills/releases/tag/v0.1.0
