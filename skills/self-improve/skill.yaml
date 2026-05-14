@@ -1,7 +1,7 @@
 id: self-improve
 name: Self-Improve
 category: ops
-summary: Review and improve the agent's operating system — skills, memory files, and config. Identifies staleness, contradictions, gaps, and bloat, then proposes and applies fixes.
+summary: Review and improve the agent's operating system — skills, memory files, CLAUDE.md configs, and session-friction patterns. Identifies staleness, contradictions, gaps, bloat, and recurring behavioral corrections, then proposes and applies fixes.
 license: Apache-2.0
 compatible_runtimes:
   - claude-code
