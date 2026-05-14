@@ -65,6 +65,10 @@ MERGED_BRANCHES="$(git branch --merged "$BASE_REF" | command grep -v '^\*\|^[[:s
 printf '%s\n' "$MERGED_BRANCHES"
 ```
 
+`command grep` exits with status `1` when there are no matches. Treat an empty
+`MERGED_BRANCHES` value as `No merged branches to clean`, not as a cleanup
+failure.
+
 Delete each listed branch with safe delete only:
 
 ```bash
@@ -87,11 +91,21 @@ For worktrees under `<repo-root>/.worktrees/`:
 
 - If the worktree is the current checkout, keep it and report that cleanup must
   run elsewhere.
-- If its branch is merged into `$BASE_REF` and the worktree is clean, remove
-  it with `git worktree remove <path>`, then try `git branch -d <branch>`.
+- If its branch is merged into `$BASE_REF` and the worktree is clean, remove it
+  with `git worktree remove <path>`, then try `git branch -d <branch>`.
 - If it has modified or untracked files, keep it and report it as dirty.
 - If it is not merged, keep it and report it as still active.
 - If the only stale signal is a missing remote branch, ask before removal.
+
+Use this cleanup decision matrix:
+
+| Worktree state | Action |
+| --- | --- |
+| Current shell is inside the worktree | Keep it; report that cleanup must run from another checkout. |
+| Repo-local `.worktrees/<name>` and branch is merged into base | Remove with `git worktree remove <path>`, then safe-delete the branch with `git branch -d <branch>`. |
+| Repo-local `.worktrees/<name>` and only the remote branch is missing | Ask before removal. |
+| Any candidate worktree is dirty or has untracked files | Keep it and report the dirty worktree. |
+| Detached runtime-managed worktree outside the repo root | Report separately unless this session created it and proved it is no longer needed. |
 
 Report either `Pruned N worktrees` or `No stale worktrees`.
 
@@ -208,7 +222,12 @@ Guidance:
   ```
 
 - Pause when `/self-improve` asks which changes to apply.
+- When pausing, relay the full `/self-improve` decision menu: recommended
+  choice if any, numbered changes, target files/repos, exact outcomes, and
+  allowed replies such as `all`, `none`, or specific numbers.
 - Apply only approved changes.
+- If `/self-improve` proposes edits outside the current repo, report that
+  clearly. Other repositories remain opt-in for commit and push scope.
 - If no findings are reported, continue.
 
 Optional follow-up: if Step 4 produced findings or the user corrected the
@@ -237,6 +256,9 @@ Rules:
   `settings.local.json` unless the user explicitly asks.
 - Exclude ephemeral runtime artifacts such as live lockfiles and local
   permission files.
+- If a lockfile contains a PID and that process is still active, treat it as
+  live runtime state and exclude it from commit decisions. If the PID is missing
+  or no longer active, report it as stale instead of silently staging it.
 - Commit message: `wrap-up: <brief summary>`.
 
 ### 6. OACP memory sync

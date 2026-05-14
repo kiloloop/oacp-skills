@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.0] - 2026-05-14
+
+### Changed
+
+- `check-inbox` skill — refreshed SKILL.md content. Adds OACP Phase 1 receiver autonomy (`always_pause` / `auto_review`) with a 4-gate evaluator, audit events, and a post-acceptance threshold checkpoint. New `references/autonomy.md` sub-doc carries the evaluator detail. Event-driven `oacp watch` is now the preferred recurring-monitoring path, with `/loop` as the fallback. Manifest bumps `requires_oacp` to `>=0.3.1`.
+- `self-improve` skill — refreshed SKILL.md content. Adds session-friction analysis (Step 4.5) — scans the current conversation for user corrections, clusters by root cause, and proposes new or extended rules. New `friction` scope flag for the dedicated pass. Adds same-day repeat narrowing (skip full scan when a prior pass ran today), first-run retrospective for skills created+executed in the same session, structural-health gate with optional skill-architecture subagent escalation, tiered memory-staleness thresholds (2/14/30 days), namespace discipline for shared skill repos, and advisory file locking for concurrent runtime writes to OACP memory.
+- `wrap-up` skill — refreshed SKILL.md content. Flow: cleanup → optional `/debrief` → org-memory events → `/self-improve` → commit → optional memory sync → push.
+
 ## [0.4.0] - 2026-05-01
 
 ### Added
@@ -51,6 +59,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill template for contributing new skills
 - CI validation workflow (skill.yaml schema, SKILL.md frontmatter, absolute path check)
 
+[0.5.0]: https://github.com/kiloloop/oacp-skills/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kiloloop/oacp-skills/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kiloloop/oacp-skills/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kiloloop/oacp-skills/compare/v0.1.0...v0.2.0

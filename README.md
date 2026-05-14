@@ -25,15 +25,15 @@ The OACP protocol primer — teaches a runtime how to use the CLI and message pr
 
 ### [check-inbox](skills/check-inbox/)
 
-Single-pass inbox processor. Scans for pending OACP messages, processes each one (read, act, reply, delete), then exits. Pair with a loop for continuous monitoring.
+Single-pass inbox processor. Scans for pending OACP messages, processes each one (read, act, reply, delete), then exits. In Claude Code, pair with Monitor + `oacp watch` (event-driven, preferred) or fall back to `/loop` polling for continuous monitoring. In Codex, run the command once or wrap it with `/loop` for recurring checks. Honors OACP Phase 1 receiver autonomy (`always_pause` / `auto_review`) with a 4-gate evaluator, audit events, and a threshold-exceeded checkpoint.
 
 **Runtimes:** Claude Code, Codex
 
 ```bash
-# Claude Code
+# Claude Code / Codex
 /check-inbox                        # single-pass scan
 /check-inbox --project myproject    # explicit project
-/loop 2m /check-inbox               # continuous polling every 2 min
+/loop 2m /check-inbox               # polling fallback (every 2 min)
 ```
 
 ---
@@ -68,15 +68,18 @@ Picks up review findings from inbox or PR comments, applies fixes, pushes update
 
 ### [self-improve](skills/self-improve/)
 
-Audits the agent's knowledge layer — skills, memory files, and config — for staleness, contradictions, gaps, and bloat. Proposes and applies surgical fixes with approval.
+Audits the agent's operating system — skills, memory files, runtime config, and AGENTS.md or CLAUDE.md instructions — for staleness, contradictions, gaps, and bloat. Proposes and applies surgical fixes with approval.
 
 **Runtimes:** Claude Code, Codex
 
 ```bash
-# Claude Code
-/self-improve                  # full review (skills + memory + config)
+# Claude Code / Codex
+/self-improve                  # full review (skills + memory + runtime config)
 /self-improve skills           # review only skills that ran this session
 /self-improve memory           # review memory files only
+/self-improve agents-md        # Codex: review AGENTS.md files + settings only
+/self-improve claude-md        # Claude Code: review CLAUDE.md files + settings only
+/self-improve friction         # Claude Code: review only session-friction patterns
 /self-improve <skill-name>     # review a single specific skill
 ```
 
@@ -107,7 +110,7 @@ End-of-session cleanup in one command. 8-step sequence: cleanup stale artifacts 
 **Runtimes:** Claude Code, Codex
 
 ```bash
-# Claude Code
+# Command
 /wrap-up            # full sequence
 /wrap-up --dry-run  # cleanup + debrief + self-improve only; skip commit, push, memory sync
 ```
