@@ -115,6 +115,18 @@ End-of-session cleanup in one command. 8-step sequence: cleanup stale artifacts 
 /wrap-up --dry-run  # cleanup + debrief + self-improve only; skip commit, push, memory sync
 ```
 
+---
+
+### [org-memory-synthesis](skills/org-memory-synthesis/)
+
+Synthesize the cross-project org-memory layer that the OACP session-init hook auto-loads. Folds new events from `$OACP_HOME/org-memory/events/` into the three curated SSOT files (`recent.md`, `decisions.md`, `rules.md`) via a marker-based incremental scan, then runs a 6-check audit (cross-file consistency, supersession asymmetry, stale-status, mechanical chronological order, category drift, migration leftovers). Pairs naturally with `/wrap-up`'s org-memory step.
+
+**Runtimes:** Claude Code, Codex
+
+```bash
+/org-memory-synthesis    # full synthesis + audit pass
+```
+
 ## How These Skills Work Together
 
 The **oacp** skill teaches a runtime how to use the OACP CLI and protocol — it's the foundation the workflow skills build on. The next three form a complete agent-to-agent code review loop:
@@ -123,7 +135,7 @@ The **oacp** skill teaches a runtime how to use the OACP CLI and protocol — it
 2. When a review request arrives, the reviewer agent runs **review-loop-reviewer** to analyze the PR diff and send structured findings back.
 3. The author agent picks up the findings via **review-loop-author**, applies fixes, and sends a `review_addressed` message — closing the loop.
 
-The remaining skills are complementary maintenance tooling: **self-improve** audits skill instructions, memory files, and config drift, while **doctor** can verify the OACP environment and workspace are healthy, especially useful at session start.
+The remaining skills are complementary maintenance tooling: **self-improve** audits skill instructions, memory files, and config drift; **doctor** verifies the OACP environment and workspace are healthy, especially useful at session start; and **org-memory-synthesis** keeps the cross-project SSOT layer (the one auto-loaded at session init) trustworthy by folding events and auditing for drift.
 
 ## Prerequisites
 

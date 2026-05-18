@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.1] - 2026-05-18
+
+### Added
+
+- `org-memory-synthesis` skill — synthesize the cross-project org-memory layer that the OACP session-init hook auto-loads. Folds new events from `$OACP_HOME/org-memory/events/` into the three curated SSOT files (`recent.md`, `decisions.md`, `rules.md`) via a marker-based incremental scan, then runs a 6-check audit (cross-file consistency, supersession asymmetry, stale-status, mechanical chronological order, category drift, migration leftovers). Both Claude Code and Codex runtimes. Pairs naturally with `/wrap-up`'s org-memory step.
+- Top-level README `org-memory-synthesis` entry between `wrap-up` and "How These Skills Work Together".
+
 ## [0.5.0] - 2026-05-14
 
 ### Changed
@@ -59,6 +66,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill template for contributing new skills
 - CI validation workflow (skill.yaml schema, SKILL.md frontmatter, absolute path check)
 
+[0.5.1]: https://github.com/kiloloop/oacp-skills/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kiloloop/oacp-skills/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kiloloop/oacp-skills/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/kiloloop/oacp-skills/compare/v0.2.0...v0.3.0
