@@ -1,35 +1,31 @@
 ---
 name: review-loop-author
-description: Run the author side of the review loop — address findings and drive to LGTM.
+description: "Run the author side of the review loop: request review, poll for feedback, optionally delegate triage or isolated fixes to Codex subagents, address findings, and report progress through inbox plus PR comments."
 ---
 
 # /review-loop-author
 
-Run the author side of a review loop for one pull request.
+Run the author-side review loop for one PR.
 
 ## Interface
 
-```bash
-/review-loop-author <PR_NUMBER> --reviewer <name> [--project <name>] [--task-id <task-id>]
-```
+`/review-loop-author <PR_NUMBER> --reviewer <name> [--project <name>] [--task-id <task-id>] [--model <model>]`
 
 - `PR_NUMBER` is required.
 - `--reviewer` is required.
-- `--project` is optional. If omitted, detect it from `.oacp` or fall back
-  to the repo name.
-- `--task-id` is optional. Include it when the review loop is tied to a tracked
-  task file.
+- `--project` is optional. If omitted, detect from repo markers and fall back to the repo name.
+- `--task-id` is optional. When present, review messages include task metadata and task review fields are updated automatically.
+- `--model` is optional. Default is to inherit the parent model; pass an override only when the user requested it or the task clearly needs it.
 
-## Execution Model
+## Codex Execution Model
 
-- Set `AGENT_NAME="codex"` and keep it consistent in every inbox message.
-- Run commands directly in the current Codex session.
-- Use inbox messages for machine state and PR comments for short human-visible
-  status updates.
-- Keep comments data-minimized. Do not include logs, stack traces, secrets, or
-  local-only paths.
-- For wait states, use one shell or terminal polling loop rather than repeated
-  manual turns.
+- The leader owns review-loop state, polling, inbox writes and deletes, task-state mutations, validation decisions, commits, pushes, and PR comments.
+- Keep polling local. Do not delegate inbox polling.
+- Treat delegation as opt-in. If the user did not ask for delegation, subagents, or parallel fix work, stay leader-only.
+- The best delegation point is after `review_feedback` is parsed: use an `explorer` to triage findings, gather evidence, map impacted files, and suggest tests.
+- Use a `worker` only for accepted fixes with a clear, isolated write scope. Default to one writer at a time.
+- Parallel writers are allowed only when write scopes are clearly disjoint and the next local step is not blocked on one of them. When unsure, stay single-writer.
+- If a delegated worker already owns the same file set and follow-up arrives, prefer `send_input` to that worker over spawning an overlapping one.
 
 ## Setup
 
@@ -38,86 +34,122 @@ set -euo pipefail
 
 AGENT_NAME="codex"
 PR_NUMBER="<PR_NUMBER>"
-REVIEWER="<reviewer>"
+REVIEWER="<reviewer_name>"
 TASK_ID="${TASK_ID:-}"
+MODEL="${MODEL:-}"
 
 REPO_PATH="$(git rev-parse --show-toplevel)"
-BRANCH="$(gh pr view "${PR_NUMBER}" --json headRefName -q .headRefName)"
-BASE_BRANCH="$(gh pr view "${PR_NUMBER}" --json baseRefName -q .baseRefName)"
-REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner)"
+PROJECT="${PROJECT:-$(python3 - <<'PY'
+import json, pathlib
 
-if [[ -z "${BASE_BRANCH}" ]]; then
-  BASE_BRANCH="main"
-fi
-```
-
-Project detection:
-
-```bash
-PROJECT="$(python3 - <<'PY'
-import json
-import os
-from pathlib import Path
-
-repo = Path(".")
-project = ""
-if os.path.islink(".oacp"):
-    target = os.readlink(".oacp")
-    project = os.path.basename(os.path.dirname(target))
-elif os.path.isfile(".oacp"):
+root = pathlib.Path.cwd()
+for marker in (".oacp", "workspace.json"):
+    path = root / marker
+    if not (path.exists() or path.is_symlink()):
+        continue
     try:
-        with open(".oacp", "r", encoding="utf-8") as f:
+        resolved = path.resolve() if path.is_symlink() else path
+        with open(resolved, "r", encoding="utf-8") as f:
             data = json.load(f)
-        project = data.get("project_name", "") or ""
+        project = data.get("project_name", "")
+        if project:
+            print(project)
+            raise SystemExit
     except Exception:
-        project = ""
-if not project:
-    project = repo.resolve().name
-print(project)
+        pass
+print(root.resolve().name)
 PY
-)"
+)}"
+
 OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
 PROJECT_ROOT="${OACP_ROOT}/projects/${PROJECT}"
 INBOX_DIR="${PROJECT_ROOT}/agents/${AGENT_NAME}/inbox"
-SCRIPTS_DIR="${OACP_ROOT}/scripts"
-SEND_MSG="${SCRIPTS_DIR}/send_inbox_message.py"
+EVAL_FIX="${EVAL_FIX:-}"
+APP_GH_TOKEN="${APP_GH_TOKEN:-}"
+
+EXPECTED_GH_USER="<account>"
+
+get_app_token() {
+  [ -n "${APP_GH_TOKEN}" ]
+}
+
+ensure_human_gh_auth() {
+  if ! gh auth switch --hostname github.com --user "${EXPECTED_GH_USER}" >/dev/null 2>&1; then
+    ACTIVE_GH_USER="$(gh api user --jq '.login' 2>/dev/null || true)"
+    [ "${ACTIVE_GH_USER}" = "${EXPECTED_GH_USER}" ] || {
+      echo "GitHub auth mismatch: expected ${EXPECTED_GH_USER}, got ${ACTIVE_GH_USER}"
+      return 1
+    }
+  fi
+}
+
+repo_gh() {
+  if get_app_token; then
+    local output rc
+    if output="$(GH_TOKEN="${APP_GH_TOKEN}" GITHUB_TOKEN="${APP_GH_TOKEN}" gh "$@" 2>&1)"; then
+      printf '%s\n' "${output}"
+      return 0
+    fi
+    rc=$?
+    case "${output}" in
+      *"Resource not accessible by integration"*|*"Bad credentials"*|*"Requires authentication"*|*"HTTP 401"*|*"HTTP 403"*)
+        printf '%s\n' "${output}" >&2
+        echo "GitHub App token auth/scope failure; falling back to human gh auth" >&2
+        ;;
+      *)
+        printf '%s\n' "${output}" >&2
+        return "${rc}"
+        ;;
+    esac
+  fi
+  ensure_human_gh_auth
+  gh "$@"
+}
+
+BRANCH="$(repo_gh pr view "${PR_NUMBER}" --json headRefName -q .headRefName)"
+BASE_BRANCH="$(repo_gh pr view "${PR_NUMBER}" --json baseRefName -q .baseRefName)"
+REPO="$(repo_gh repo view --json nameWithOwner -q .nameWithOwner)"
 ```
-
-GitHub auth rule:
-
-- Read the nearest repo `AGENTS.md` before any repo-scoped `gh` command.
-- If the repo requires GitHub App auth, generate and use the short-lived app
-  token exactly as that repo specifies.
-- Fall back to verified human auth only after a concrete app failure.
 
 Validate preconditions:
 
 ```bash
-gh pr view "${PR_NUMBER}" --repo "${REPO}" >/dev/null
+repo_gh pr view "${PR_NUMBER}" --repo "${REPO}" >/dev/null
+command -v oacp >/dev/null
 test -d "${INBOX_DIR}"
-test -f "${SEND_MSG}"
 ```
 
 ## Procedure
 
-### 1. Prepare the review request
+### Step 1: Prepare and send `review_request`
 
-Before you ask for review:
+Before requesting review:
 
-- Push all local commits for the PR branch.
-- Make sure the PR title and description match the real scope.
-- Run the repo's pre-review checks.
+- Ensure all commits are pushed to the PR branch.
+- Ensure the PR description matches the actual scope.
+- Ensure the relevant pre-review checks already passed.
+- Treat the normal `review_request` path as a formal review round. If the PR is still draft, mark it ready for review before sending the request. Only keep the PR draft when the user explicitly wants informal draft feedback outside the normal review loop.
 
-Build a concise diff summary:
+Create a concise diff summary:
 
 ```bash
 DIFF_SUMMARY="$(git diff "${BASE_BRANCH}...${BRANCH}" --stat)"
 ```
 
-### 2. Send `review_request`
+Ensure the PR is ready for formal review:
 
 ```bash
-python3 "${SEND_MSG}" "${PROJECT}" \
+IS_DRAFT="$(repo_gh pr view "${PR_NUMBER}" --repo "${REPO}" --json isDraft -q .isDraft)"
+if [ "${IS_DRAFT}" = "true" ]; then
+  repo_gh pr ready "${PR_NUMBER}" --repo "${REPO}"
+fi
+```
+
+Send the review request:
+
+```bash
+oacp send "${PROJECT}" \
+  --oacp-dir "${OACP_ROOT}" \
   --from "${AGENT_NAME}" \
   --to "${REVIEWER}" \
   --type review_request \
@@ -132,42 +164,30 @@ review_round: 1" \
   --priority P1
 ```
 
-Always add a short PR comment:
-
-```bash
-COMMENT_FILE="$(mktemp)"
-cat > "${COMMENT_FILE}" <<EOF
-**Review requested** - ${AGENT_NAME} -> ${REVIEWER}
-
-Round: 1
-Scope: PR #${PR_NUMBER}
-Details delivered via inbox review_request message.
-EOF
-gh pr comment "${PR_NUMBER}" --repo "${REPO}" --body-file "${COMMENT_FILE}"
-rm -f "${COMMENT_FILE}"
-```
+Always add a status-only PR comment.
 
 Initialize:
 
 - `current_round=1`
 - `poll_interval=30`
-- `max_rounds=2` unless the repo documents another limit
-- `timeout_minutes=15` unless the repo documents another limit
+- `max_rounds=3`
+- `timeout_minutes=15`
 
-### 3. Poll for reviewer output
+### Step 2: Poll for reviewer response
 
-Loop until you find a same-PR message from the reviewer with type
-`review_feedback` or `review_lgtm`.
+Keep polling local. Prefer a single in-session loop or `/loop 30s /check-inbox` when that command is already part of the workflow.
 
-If no matching message appears yet:
+Wait for inbox messages where:
 
-- sleep for `poll_interval`
-- re-scan the inbox
-- escalate only after the configured timeout
+- `from` is the reviewer
+- `related_pr` is the current PR
+- `type` is `review_feedback` or `review_lgtm`
 
-### 4. Parse `review_feedback`
+If `review_feedback`, continue to Step 3. If `review_lgtm`, continue to Step 8. If the timeout is reached, continue to Step 9.
 
-Extract:
+### Step 3: Parse `review_feedback`
+
+Extract from the message body:
 
 - `findings_packet`
 - `round`
@@ -175,65 +195,129 @@ Extract:
 - `task_id` when present
 - `review_round` when present
 
-Validate the findings packet path before acting:
+If the body contains `escalation: max_rounds_exceeded`, continue to Step 9.
+
+Resolve and verify the findings packet path:
 
 ```bash
-FINDINGS_REL="packets/findings/<packet>.yaml"
+FINDINGS_REL="packets/findings/..."
 FINDINGS_PATH="${PROJECT_ROOT}/${FINDINGS_REL}"
 test -f "${FINDINGS_PATH}"
 ```
 
-If the message is malformed or the findings packet is missing, send a
-`question` asking the reviewer to resend the required data and pause the loop.
+Do not delete the feedback message yet. Record its path and delete it only after the reply path succeeds.
 
-Delete the processed feedback message only after you have safely parsed it.
+If `task_id` is present, update the task review fields before implementation:
 
-### 5. Triage findings
+- `review_round`
+- `review_status: needs_changes`
+- append `findings_packet` if missing
 
-Prioritize in this order:
+### Step 4: Triage findings
 
-1. Open blocking `P0`
-2. Open blocking `P1`
-3. Non-blocking `P0` or `P1`
-4. `P2` and `P3`
+Select all findings with `status: open` and prioritize:
 
-For each finding, choose one path:
+1. P0 blocking
+2. P1 blocking
+3. Non-blocking P0 or P1
+4. P2 or P3
 
-1. Fix it when it is valid and in scope.
-2. Push back with a `question` when it is incorrect or unclear.
-3. Defer it only when it is clearly out of scope and you can explain the next
-   step.
+For packets with multiple findings, ambiguous findings, or uncertain scope, spawn an `explorer` to produce a compact triage plan.
 
-### 6. Apply fixes and validate
+Recommended prompt shape:
 
-For each valid finding:
+```text
+You are the triage subagent for PR #<PR_NUMBER>.
 
-- implement the fix
-- run the relevant local validation
-- commit the change
-- push the branch update
+Review the findings packet and the relevant repo files. Do not edit files or run shell commands.
 
-Example commit:
-
-```bash
-git add <files>
-git commit -m "Fix <finding-id>: <brief description>"
-git push origin "${BRANCH}"
+Return a compact table with one row per open finding:
+- finding_id
+- disposition: fix | pushback | defer
+- confidence: high | medium | low
+- owner_files: explicit file paths likely involved
+- tests_to_run: targeted checks
+- notes: one short sentence
 ```
 
-Optional pre-check when several findings or multi-file edits are involved:
+Use:
 
-- If the repo provides a findings-vs-diff helper, run it here before
-  re-requesting review.
-- If no such helper exists, skip this step and rely on targeted local
-  validation.
+- `spawn_agent(agent_type="explorer", reasoning_effort="high", fork_context=false, message=PROMPT)` by default; include `model=MODEL` only when `MODEL` is non-empty.
+- `wait_agent` once the leader is ready to review the triage result
 
-### 7. Send `review_addressed` and re-request review
+The leader makes the final decision. The explorer is advisory.
+
+### Step 5: Address each finding
+
+For each accepted finding:
+
+1. Read the finding details and the suggested triage output.
+2. Decide whether to fix locally or delegate implementation.
+3. Run targeted validation.
+4. Commit and push from the leader session.
+
+Use local implementation when:
+
+- the change is tiny
+- the next step depends immediately on the edit
+- the write scope overlaps other active work
+
+Use a `worker` when:
+
+- the finding is valid and clear
+- the write scope is explicit
+- the worker can own a bounded file set without stepping on other edits
+
+When delegating a fix:
+
+- tell the worker it is not alone in the codebase
+- give it explicit file ownership
+- tell it not to commit, push, comment, or send inbox messages
+- review its diff before integrating or validating
+
+Default to one writer worker at a time. Parallel writers are an exception, not the baseline.
+
+Pushback example:
+
+```bash
+oacp send "${PROJECT}" \
+  --oacp-dir "${OACP_ROOT}" \
+  --from "${AGENT_NAME}" \
+  --to "${REVIEWER}" \
+  --type question \
+  --subject "Question on finding F-001 (#${PR_NUMBER})" \
+  --body "Please clarify finding F-001: <reason>" \
+  --related-pr "${PR_NUMBER}" \
+  --priority P1
+```
+
+### Step 6: Run `eval_fix.py` when it is worth it
+
+Use this pre-check when addressing 3 or more findings or when the fix set spans multiple files:
+
+```bash
+if [ -n "${EVAL_FIX}" ] && test -f "${EVAL_FIX}"; then
+  python3 "${EVAL_FIX}" "${FINDINGS_PATH}" --diff-ref "${BASE_BRANCH}..HEAD" --verbose
+fi
+```
+
+- If it reports unaddressed findings, fix them before replying.
+- Skip it for single trivial findings.
+- If it errors, log it and continue.
+
+### Step 7: Send `review_addressed` and a fresh `review_request`
+
+After fixes are pushed:
 
 ```bash
 LATEST_SHA="$(git rev-parse HEAD)"
+```
 
-python3 "${SEND_MSG}" "${PROJECT}" \
+Send `review_addressed`:
+
+```bash
+oacp send "${PROJECT}" \
+  --oacp-dir "${OACP_ROOT}" \
   --from "${AGENT_NAME}" \
   --to "${REVIEWER}" \
   --type review_addressed \
@@ -248,15 +332,18 @@ review_round: ${current_round}" \
   --priority P1
 ```
 
-Then send a fresh `review_request` for the next round. `review_addressed`
-reports what changed; the new `review_request` is the stateless re-review
-trigger.
+Then send a fresh `review_request` for round `N+1`:
 
 ```bash
 NEXT_ROUND=$((current_round + 1))
 RE_REVIEW_SUMMARY="$(git diff "${BASE_BRANCH}...HEAD" --stat)"
+IS_DRAFT="$(repo_gh pr view "${PR_NUMBER}" --repo "${REPO}" --json isDraft -q .isDraft)"
+if [ "${IS_DRAFT}" = "true" ]; then
+  repo_gh pr ready "${PR_NUMBER}" --repo "${REPO}"
+fi
 
-python3 "${SEND_MSG}" "${PROJECT}" \
+oacp send "${PROJECT}" \
+  --oacp-dir "${OACP_ROOT}" \
   --from "${AGENT_NAME}" \
   --to "${REVIEWER}" \
   --type review_request \
@@ -271,9 +358,11 @@ review_round: ${NEXT_ROUND}" \
   --priority P1
 ```
 
-Update `current_round="${NEXT_ROUND}"`, then return to polling.
+Delete the processed `review_feedback` message only after both outbound messages succeed.
 
-### 8. Handle `review_lgtm`
+Set `current_round="${NEXT_ROUND}"` and return to Step 2.
+
+### Step 8: Handle `review_lgtm`
 
 Confirm the body includes:
 
@@ -283,56 +372,77 @@ Confirm the body includes:
 Then:
 
 1. Delete the `review_lgtm` message.
-2. Tell the user the PR is review-approved.
-3. Do not auto-merge unless the user or project policy explicitly requests it.
+2. Report that the PR is merge-ready.
+3. Do not auto-merge unless explicitly asked and repo policy allows it.
+4. If merge is requested, run `repo_gh pr checks` first and block merge on any non-pass status.
+5. If `task_id` is present, update the task review fields to approved.
 
-If a merge is requested, apply the CI gate first:
+Exit with success.
 
-```bash
-gh pr checks "${PR_NUMBER}" --repo "${REPO}"
-```
+### Step 9: Handle timeout or escalation
 
-Do not merge while any required check is failing, pending, or still running.
-If `preflight` exists, it must be `pass`.
+Escalate when:
 
-### 9. Handle timeout or escalation
+1. `current_round > max_rounds`
+2. feedback contains `escalation: max_rounds_exceeded`
+3. polling exceeds timeout
 
-Escalate when any of these are true:
+Send a notification to the team lead and add a status-only PR comment.
 
-1. `current_round` exceeds the repo's max rounds
-2. reviewer feedback includes an escalation marker
-3. polling exceeds the configured timeout
+Exit with `ESCALATED` or `TIMEOUT`.
 
-Send an escalation notification:
+### Step 10: Clean up
 
-```bash
-TEAM_LEAD="${TEAM_LEAD:-team-lead}"
+After exit:
 
-python3 "${SEND_MSG}" "${PROJECT}" \
-  --from "${AGENT_NAME}" \
-  --to "${TEAM_LEAD}" \
-  --type notification \
-  --subject "Review escalation: PR #${PR_NUMBER}" \
-  --body "Review loop for PR #${PR_NUMBER} escalated after ${current_round} rounds.
-Reason: max_rounds_exceeded|timeout|reviewer_escalation
-Next steps: synchronous coordination or human review." \
-  --related-pr "${PR_NUMBER}" \
-  --priority P1
-```
+- Delete processed `review_feedback` and `review_lgtm` messages.
+- Optionally prune sent `review_addressed` from outbox by retention policy.
+- Do not update durable memory files such as `open_threads.md` during normal review-loop execution. Leave that for `/debrief` or `/self-improve`.
 
-Add a short PR comment explaining that the review loop needs manual follow-up.
+## Decision rules
 
-## Decision Rules
+### Fix vs push back vs defer
 
-- Fix valid in-scope findings.
-- Ask clarifying questions when a finding is incomplete or incorrect.
-- Defer only with an explicit follow-up plan.
-- Keep PR comments short and status-oriented.
+1. Fix when the finding is valid and in scope.
+2. Push back when the finding is incorrect or unclear.
+3. Defer when the finding is valid but out of scope for the current PR.
 
-## Status Outputs
+### When to delegate
 
-Use one of these terminal markers when useful:
+1. Use an `explorer` for triage and evidence gathering.
+2. Use a `worker` only for bounded implementation tasks with explicit file ownership.
+3. Keep commits, pushes, comments, inbox messages, and validation gates in the leader.
+
+### When to escalate
+
+1. Escalate when rounds exceed the limit.
+2. Escalate when the reviewer explicitly signals max rounds exceeded.
+3. Escalate on reviewer timeout.
+
+## Error handling
+
+- Malformed `review_feedback` body: ask the reviewer to resend required fields.
+- Missing findings packet path: ask for clarification and pause the loop.
+- Delegated worker returns overlapping or unsafe changes: stop delegating, review locally, and continue with leader ownership.
+- `git push` failure: resolve and retry; escalate only when blocked.
+- `eval_fix.py` failure: log and continue because it is optional.
+
+## PR comment rule
+
+- Keep PR comments concise and status-oriented.
+- Store details in protocol messages and findings packets, not in PR comments.
+- Never include command output, logs, stack traces, credentials, environment values, or local-only paths in PR comments.
+
+## Status outputs
 
 - `STATUS: PASSED`
 - `STATUS: ESCALATED`
 - `STATUS: TIMEOUT`
+
+## Learned from runs
+
+- The useful delegation point for author-side review loops is after the feedback packet is in hand, not during polling or GitHub I/O.
+- Triage explorers save time on multi-finding packets by mapping likely files and tests before editing starts.
+- Single-writer delegation is much safer than parallel writers for review-fix work; overlapping workers create more merge risk than they remove.
+- A formal inbox `review_request` should line up with GitHub review state. If the PR is still draft, mark it ready for review before sending the initial request or any re-review request.
+- 2026-04-29: If a reviewer sends `review_lgtm` with non-blocking findings and the author chooses to fix those findings anyway, treat the existing LGTM as stale because the branch changed after approval. Send `review_addressed` plus a fresh `review_request`, delete the stale LGTM only after both outbound messages succeed, and wait for a new LGTM on the new head before merging.

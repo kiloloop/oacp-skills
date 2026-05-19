@@ -1,155 +1,212 @@
 ---
 name: review-loop-reviewer
-description: Run the reviewer side of the review loop — review PR diffs, produce findings, and evaluate quality gate.
+description: "Run the reviewer side of the review loop: gather PR context, optionally delegate read-only review analysis to a Codex subagent, write findings packets, and send feedback or LGTM."
 ---
 
 # /review-loop-reviewer
 
-Run the reviewer side of a review loop for one pull request.
-
-This workflow works best as a split:
-
-- the leader session does all Git, GitHub, and inbox I/O
-- an optional helper handles read-only analysis only
-
-If the runtime does not support a read-only helper, perform the analysis in the
-main session and keep the same verdict format.
+Run the reviewer-side review loop for one PR.
 
 ## Interface
 
-```bash
-/review-loop-reviewer <PR_NUMBER> --author <name> [--project <name>] [--task-id <task-id>] [--model <name>] [--dry-run]
-```
+`/review-loop-reviewer <PR_NUMBER> --author <name> [--project <name>] [--task-id <id>] [--model <model>] [--dry-run]`
 
-- `PR_NUMBER`: required
-- `--author`: required reviewer-loop author agent name
-- `--project`: optional project override
-- `--task-id`: optional task context
-- `--model`: optional helper model when the runtime supports it
-- `--dry-run`: gather and print context, then stop before analysis
+- `PR_NUMBER` is required.
+- `--author` is required.
+- `--project` is optional. If omitted, detect from repo markers and fall back to the repo name.
+- `--task-id` is optional task context.
+- `--model` is optional. Default is to inherit the parent model; pass an override only when the user requested it or the task clearly needs it.
+- `--dry-run` gathers context and prints the planned flow without spawning a subagent or sending review results.
 
-## Workflow
+## Codex Execution Model
 
-### 1. Parse arguments
+- The leader owns all shell work: `git`, `gh`, inbox reads and deletes, packet writes, PR comments, PR approvals, and final status decisions.
+- The delegated reviewer is analysis-only. Prefer `spawn_agent` with `agent_type="explorer"` or a repo-specific custom reviewer agent when one exists.
+- Treat delegation as opt-in. If the user did not ask for delegation, subagents, or parallel review work, run the leader-only analysis path.
+- Do not let the subagent send inbox messages, write packets, comment on the PR, or mutate the repo.
+- If `spawn_agent` is unavailable, fails, or is overkill for a tiny diff, run the analysis locally in the current thread with the same verdict contract.
+- For round 2+, prefer `send_input` to the same delegated reviewer when the previous context is still useful. Otherwise close the old agent and spawn a fresh one.
+
+## 1. Parse arguments
 
 Extract:
 
-- `PR_NUMBER`
-- `AUTHOR`
-- `PROJECT`
-- `TASK_ID`
-- `MODEL`
-- `DRY_RUN`
+- `PR_NUMBER` from the first positional arg. Error if missing.
+- `AUTHOR` from `--author`. Error if missing.
+- `PROJECT_FLAG` from `--project`.
+- `TASK_ID` from `--task-id` (default empty).
+- `MODEL` from `--model` (default empty, meaning inherit the parent model).
+- `DRY_RUN` from `--dry-run`.
 
-Error if `PR_NUMBER` or `--author` is missing.
+## 2. Resolve repo, runtime, and GitHub auth
 
-### 2. Resolve auth and repo context
-
-Before any repo-scoped `gh` command:
-
-- inspect the nearest repo `AGENTS.md`
-- use the repo's preferred GitHub identity, usually a GitHub App token when the
-  repo requires it
-- fall back to verified human auth only after a concrete app failure
-
-Use a wrapper such as:
+Set up the repo and auth wrappers first:
 
 ```bash
-REPO_GH_MODE="app-or-human"
+REPO_PATH="$(git rev-parse --show-toplevel)"
+
+PROJECT="${PROJECT_FLAG:-$(python3 - <<'PY'
+import json, pathlib
+
+root = pathlib.Path.cwd()
+for marker in (".oacp", "workspace.json"):
+    path = root / marker
+    if not (path.exists() or path.is_symlink()):
+        continue
+    try:
+        resolved = path.resolve() if path.is_symlink() else path
+        with open(resolved, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        project = data.get("project_name", "")
+        if project:
+            print(project)
+            raise SystemExit
+    except Exception:
+        pass
+print(root.resolve().name)
+PY
+)}"
+
+OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
+PROJECT_ROOT="${OACP_ROOT}/projects/${PROJECT}"
+INBOX_DIR="${PROJECT_ROOT}/agents/codex/inbox"
+PACKETS_DIR="${PROJECT_ROOT}/packets/findings"
 APP_GH_TOKEN="${APP_GH_TOKEN:-}"
 
-repo_gh() {
-  if [ "${REPO_GH_MODE}" = "app" ]; then
-    GH_TOKEN="${APP_GH_TOKEN}" GITHUB_TOKEN="${APP_GH_TOKEN}" gh "$@"
-  else
-    gh "$@"
+EXPECTED_GH_USER="<account>"
+
+get_app_token() {
+  [ -n "${APP_GH_TOKEN}" ]
+}
+
+ensure_human_gh_auth() {
+  if ! gh auth switch --hostname github.com --user "${EXPECTED_GH_USER}" >/dev/null 2>&1; then
+    ACTIVE_GH_USER="$(gh api user --jq '.login' 2>/dev/null || true)"
+    [ "${ACTIVE_GH_USER}" = "${EXPECTED_GH_USER}" ] || {
+      echo "GitHub auth mismatch: expected ${EXPECTED_GH_USER}, got ${ACTIVE_GH_USER}"
+      return 1
+    }
   fi
+}
+
+repo_gh() {
+  if get_app_token; then
+    local output rc
+    if output="$(GH_TOKEN="${APP_GH_TOKEN}" GITHUB_TOKEN="${APP_GH_TOKEN}" gh "$@" 2>&1)"; then
+      printf '%s\n' "${output}"
+      return 0
+    fi
+    rc=$?
+    case "${output}" in
+      *"Resource not accessible by integration"*|*"Bad credentials"*|*"Requires authentication"*|*"HTTP 401"*|*"HTTP 403"*)
+        printf '%s\n' "${output}" >&2
+        echo "GitHub App token auth/scope failure; falling back to human gh auth" >&2
+        ;;
+      *)
+        printf '%s\n' "${output}" >&2
+        return "${rc}"
+        ;;
+    esac
+  fi
+  ensure_human_gh_auth
+  gh "$@"
 }
 ```
 
-Resolve the PR context:
+Notes:
+
+- Inspect the nearest `AGENTS.md` before repo-scoped `gh` calls and use GitHub App auth first when the repo requires it.
+- Treat all PR and repo `gh` calls in this skill as repo-scoped, even read-only ones.
+- If GitHub App auth is required, obtain a repo-scoped token using the nearest repo instructions and export it as `APP_GH_TOKEN`; do not hardcode helper paths or persist tokens.
+- Fall back to human auth only after a concrete App-token failure and verify the active login before proceeding.
+- Do not rely on `gh api user` for GitHub App installation tokens; that endpoint may return `403` even when the token is valid. Verify App auth with a repo-scoped command such as `gh pr view`, `gh pr comment`, or `gh pr review`.
+
+Resolve PR metadata:
 
 ```bash
 BRANCH="$(repo_gh pr view "${PR_NUMBER}" --json headRefName -q .headRefName)"
 BASE_BRANCH="$(repo_gh pr view "${PR_NUMBER}" --json baseRefName -q .baseRefName)"
-REPO="$(repo_gh pr view "${PR_NUMBER}" --json headRepositoryOwner,headRepository -q '\"\(.headRepositoryOwner.login)/\(.headRepository.name)\"' 2>/dev/null || repo_gh repo view --json nameWithOwner -q .nameWithOwner)"
-REPO_PATH="$(git rev-parse --show-toplevel)"
+REPO="$(repo_gh pr view "${PR_NUMBER}" --json headRepositoryOwner,headRepository -q '"\(.headRepositoryOwner.login)/\(.headRepository.name)"' 2>/dev/null || repo_gh repo view --json nameWithOwner -q .nameWithOwner)"
 ```
 
-Detect the project name from `--project`, `.oacp`, or the repo name:
+## 3. Check preconditions
 
-```bash
-PROJECT="$(python3 - <<'PY'
-import json
-import os
-from pathlib import Path
+Verify:
 
-project = ""
-if os.path.islink(".oacp"):
-    target = os.readlink(".oacp")
-    project = os.path.basename(os.path.dirname(target))
-elif os.path.isfile(".oacp"):
-    try:
-        with open(".oacp", "r", encoding="utf-8") as f:
-            data = json.load(f)
-        project = data.get("project_name", "") or ""
-    except Exception:
-        project = ""
-if not project:
-    project = Path.cwd().resolve().name
-print(project)
-PY
-)"
-OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
-INBOX_DIR="${OACP_ROOT}/projects/${PROJECT}/agents/codex/inbox"
-SCRIPTS_DIR="${OACP_ROOT}/scripts"
-PACKETS_DIR="${OACP_ROOT}/projects/${PROJECT}/packets/findings"
-```
+- `repo_gh pr view "${PR_NUMBER}" --repo "${REPO}"` succeeds.
+- `AUTHOR` is not empty.
+- `command -v oacp >/dev/null` succeeds.
+- `test -d "${INBOX_DIR}"`.
+- `gh` is authenticated under the repo's required identity.
 
-Validate:
-
-- the PR exists
-- the inbox directory exists
-- the scripts directory exists
-
-Create the findings directory if needed:
+Pre-create packets dir:
 
 ```bash
 mkdir -p "${PACKETS_DIR}"
 ```
 
-### 3. Pre-gather everything the analysis step needs
+If any precondition fails, report it and stop.
 
-Read the project memory files when they exist:
+## 4. Pre-gather context
 
-- `${OACP_ROOT}/projects/${PROJECT}/memory/project_facts.md`
-- `${OACP_ROOT}/projects/${PROJECT}/memory/open_threads.md`
+The leader gathers everything needed for analysis.
 
-Then gather:
+### 4a. Read project memory
 
-1. the matching inbox `review_request` for this author and PR, if present
-2. all existing PR comments and reviews, so you do not duplicate prior findings
-3. the full diff between `BASE_BRANCH` and `BRANCH`
-4. the PR title and body
+Read these files when present and summarize them into `MEMORY_CONTEXT`:
 
-Suggested GitHub calls:
+- `${PROJECT_ROOT}/memory/project_facts.md`
+- `${PROJECT_ROOT}/memory/open_threads.md`
+
+### 4b. Parse inbox context
+
+List the inbox:
 
 ```bash
-INLINE_COMMENTS="$(repo_gh api repos/${REPO}/pulls/${PR_NUMBER}/comments --jq '.[].body' 2>/dev/null || true)"
-REVIEW_COMMENTS="$(repo_gh api repos/${REPO}/pulls/${PR_NUMBER}/reviews --jq '.[] | \"\\(.state): \\(.body)\"' 2>/dev/null || true)"
-ISSUE_COMMENTS="$(repo_gh api repos/${REPO}/issues/${PR_NUMBER}/comments --jq '.[].body' 2>/dev/null || true)"
+command ls -1 "${INBOX_DIR}/"
+```
 
-git fetch origin "${BRANCH}" "${BASE_BRANCH}"
+Look for:
+
+- `*_${AUTHOR}_review_request.yaml`
+- `*_${AUTHOR}_review_addressed.yaml` when this is a manual re-review continuation
+
+Extract:
+
+- `CURRENT_ROUND` from `review_round` when present, otherwise `1`
+- `TASK_ID` from the message when present, otherwise CLI fallback
+- the inbox file paths to delete only after the terminal reply succeeds
+
+### 4c. Gather existing GitHub comments
+
+Fetch all three comment surfaces so the reviewer does not duplicate prior feedback:
+
+```bash
+INLINE_COMMENTS="$(repo_gh api "repos/${REPO}/pulls/${PR_NUMBER}/comments" --jq '.[].body' 2>/dev/null || echo "")"
+REVIEW_COMMENTS="$(repo_gh api "repos/${REPO}/pulls/${PR_NUMBER}/reviews" --jq '.[] | "\(.state): \(.body)"' 2>/dev/null || echo "")"
+ISSUE_COMMENTS="$(repo_gh api "repos/${REPO}/issues/${PR_NUMBER}/comments" --jq '.[].body' 2>/dev/null || echo "")"
+```
+
+Combine them into `EXISTING_COMMENTS`.
+
+### 4d. Gather diff and PR text
+
+```bash
+git fetch origin "${BRANCH}"
 DIFF_TEXT="$(git diff "origin/${BASE_BRANCH}...origin/${BRANCH}")"
 PR_INFO="$(repo_gh pr view "${PR_NUMBER}" --json title,body)"
 ```
 
-If a matching `review_request` exists, extract `task_id` and `review_round`
-from it. Otherwise fall back to CLI arguments and default `CURRENT_ROUND=1`.
+Store:
 
-### 4. Show the plan
+- `PR_TITLE`
+- `PR_BODY`
+- `DIFF_TEXT`
+- `DIFF_LINE_COUNT`
 
-Print a concise summary for the user:
+## 5. Show the plan
+
+Display:
 
 ```text
 Review Loop - Reviewer Side
@@ -160,44 +217,84 @@ Review Loop - Reviewer Side
   Project:     <PROJECT>
   Task ID:     <TASK_ID or empty>
   Round:       <CURRENT_ROUND>
-  Model:       <MODEL or default>
+  Model:       <MODEL or inherited parent model>
   Inbox:       <INBOX_DIR>
   Packets dir: <PACKETS_DIR>
+  Diff size:   <DIFF_LINE_COUNT> lines
+  Existing comments: <count>
 ```
 
-If `--dry-run` was provided, stop here.
+If `DIFF_LINE_COUNT` is above roughly `3000`, warn that delegated prompts get large and that leader-only review or diff splitting may be better.
 
-### 5. Run the analysis step
+If `--dry-run`, stop here.
 
-Preferred path:
+## 6. Run the analysis
 
-- use a read-only helper
-- pass only pre-gathered context
-- do not let the helper run Git, GitHub, inbox, or file-write commands
+### Preferred path: delegated analysis
 
-Fallback path:
+Delegate when the diff is non-trivial or you want a second-pass reviewer. Use a prompt equivalent to:
 
-- perform the same analysis in the main session
-- keep the output contract identical
+````text
+You are the analysis subagent for reviewing PR #<PR_NUMBER> on repo <REPO>.
 
-The analysis step must output a verdict block in this exact shape:
+Your only job is to analyze the PR diff and output a structured verdict with findings YAML. The leader owns all shell, inbox, GitHub, and packet-writing work.
 
+Do not run shell commands. Do not edit files. You may inspect files in the repo when needed for context.
+
+## Context
+
+- PR number: <PR_NUMBER>
+- Branch: <BRANCH>
+- Repo: <REPO>
+- Author: <AUTHOR>
+- Project: <PROJECT>
+- Task ID: <TASK_ID>
+- Round: <CURRENT_ROUND>
+- Findings packet path: <PACKETS_DIR>/<YYYYMMDD>_<topic>_codex_r<CURRENT_ROUND>.yaml
+
+## PR Title
+
+<PR_TITLE>
+
+## PR Body
+
+<PR_BODY>
+
+## Project Context
+
+<MEMORY_CONTEXT>
+
+## Existing PR Comments
+
+<EXISTING_COMMENTS or "None.">
+
+## Full Diff
+
+```diff
+<DIFF_TEXT>
 ```
+
+## Review Heuristics
+
+- Review only issues introduced by the diff.
+- Compare the actual diff to the PR title and body.
+- Mark `blocking: true` only for bugs, security issues, or protocol violations.
+- Include a concrete recommendation for every finding.
+- On re-review rounds, check whether previous findings were addressed and whether the fixes introduced new issues.
+
+## Output Contract
+
+As the final block of your response, print exactly:
+
+```text
 ---VERDICT---
 result: pass|fail
 blocking_count: <N>
 non_blocking_count: <N>
-packet_path: <full path where the leader should write the findings YAML>
+packet_path: <full path>
 summary: <1-2 sentence summary>
 ---FINDINGS_YAML---
-<complete findings YAML>
----END_VERDICT---
-```
-
-Required findings packet schema:
-
-```yaml
-packet_id: "<date>_<topic>_codex_r<round>"
+packet_id: "<YYYYMMDD>_<topic>_codex_r<round>"
 source_review_packet: ""
 reviewer: "codex"
 round: <N>
@@ -216,38 +313,55 @@ findings:
     line: <N>
     repro: "<how to reproduce>"
     expected: "<correct behavior>"
-    evidence: "<supporting evidence>"
-    recommendation: "<specific fix>"
+    evidence: "<evidence>"
+    recommendation: "<suggested fix>"
+---END_VERDICT---
 ```
+````
 
-Review heuristics:
+Spawn the reviewer:
 
-- review only issues introduced by the diff
-- compare the actual diff to the PR title and body
-- treat bugs, security issues, and protocol violations as blocking
-- keep stylistic issues non-blocking unless the repo says otherwise
-- on re-review, check both addressed findings and regressions introduced by the
-  fixes
+- Prefer `spawn_agent(agent_type="explorer", reasoning_effort="high", fork_context=false, message=PROMPT)` by default; include `model=MODEL` only when `MODEL` is non-empty.
+- If the repo ships a custom reviewer agent and the current session already uses it successfully, that is also acceptable.
+- Because the next step depends on the verdict, call `wait_agent` once with a reasonable timeout instead of busy-polling.
 
-### 6. Post-process the verdict
+If the delegated path times out or fails:
 
-After the analysis step completes:
+- Fall back to leader-only analysis in the current thread.
+- Preserve the same verdict block and YAML contract so post-processing stays identical.
 
-1. parse the verdict block
-2. write the findings YAML to `packet_path`
-3. read the written packet back to verify it
+### Re-review path
 
-Then branch on the result.
+If a prior delegated reviewer is still open and the next round is tightly related, reuse it with `send_input` and only the delta context:
 
-### 7. If the gate passes, send `review_lgtm`
+- updated round number
+- updated diff
+- updated comments
+- any prior packet path that matters for comparison
 
-Send an inbox message:
+If the prior delegated reviewer is no longer the right context holder, close it and spawn a fresh one.
+
+Do not run multiple reviewer subagents against the same unresolved round.
+
+## 7. Post-process the verdict
+
+After delegated or leader-only analysis finishes:
+
+1. Parse the `---VERDICT---` block.
+2. Extract `result`, `blocking_count`, `non_blocking_count`, `packet_path`, `summary`, and the YAML between `---FINDINGS_YAML---` and `---END_VERDICT---`.
+3. Write the findings packet to `packet_path`.
+4. Read the file back to verify it was written correctly.
+
+## 8. Send LGTM or feedback
+
+### If result is `pass`
+
+Send inbox LGTM:
 
 ```bash
-python3 "${SCRIPTS_DIR}/send_inbox_message.py" "${PROJECT}" \
-  --from codex \
-  --to "${AUTHOR}" \
-  --type review_lgtm \
+oacp send "${PROJECT}" \
+  --oacp-dir "${OACP_ROOT}" \
+  --from codex --to "${AUTHOR}" --type review_lgtm \
   --subject "LGTM: PR #${PR_NUMBER}" \
   --body "quality_gate_result: pass
 merge_ready: true
@@ -257,65 +371,73 @@ review_round: ${CURRENT_ROUND}" \
   --priority P1
 ```
 
-Then:
+If the repo allows approval from the current identity, submit a PR approval using `repo_gh pr review ... --approve` with a temp file. Otherwise rely on the inbox LGTM plus a status-only PR comment.
 
-- post a short PR comment for human visibility
-- add a GitHub approval only when the repo allows it and the active identity is
-  valid for approval
+Always add a PR comment:
 
-If the repo uses a shared or self-authored identity that cannot approve
-meaningfully, skip the GitHub approval and rely on the inbox `review_lgtm` plus
-the PR comment.
+```text
+**LGTM** - codex
 
-### 8. If the gate fails, send `review_feedback`
+Quality gate: pass. Merge ready.
+```
 
-Send:
+Print `STATUS: LGTM_SENT`.
+
+### If result is `fail`
+
+Send inbox feedback:
 
 ```bash
-python3 "${SCRIPTS_DIR}/send_inbox_message.py" "${PROJECT}" \
-  --from codex \
-  --to "${AUTHOR}" \
-  --type review_feedback \
+oacp send "${PROJECT}" \
+  --oacp-dir "${OACP_ROOT}" \
+  --from codex --to "${AUTHOR}" --type review_feedback \
   --subject "Review feedback: round ${CURRENT_ROUND} (#${PR_NUMBER})" \
   --body "findings_packet: packets/findings/<packet_filename>
 round: ${CURRENT_ROUND}
-blocking_count: ${BLOCKING_COUNT}
+blocking_count: <blocking_count>
 task_id: ${TASK_ID:-}
 review_round: ${CURRENT_ROUND}" \
   --related-pr "${PR_NUMBER}" \
   --priority P1
 ```
 
-If the repo's max round count is already reached, append an escalation marker to
-the body and report that the loop needs manual coordination.
+If `CURRENT_ROUND >= 2`, append:
 
-Always add a status-only PR comment. Do not paste the findings packet, logs, or
-local paths into the comment.
+```text
+escalation: max_rounds_exceeded
+```
 
-### 9. Optional re-review wait
+Always add a status-only PR comment and print either:
 
-If the chosen workflow keeps the reviewer active for one more round, poll for
-`review_addressed` with a shell loop and a bounded timeout. When it arrives:
+- `STATUS: FEEDBACK_SENT_ROUND_<CURRENT_ROUND>`
+- `STATUS: ESCALATED`
 
-1. read and parse it
-2. refresh the diff
-3. optionally run `eval_fix.py`
-4. increment the round
-5. repeat the gather-analyze-post-process flow
+## 9. Round 2 handling
 
-If no re-review message arrives within the timeout, stop and let the author
-re-invoke the skill later with a new `review_request`.
+After non-escalated feedback:
 
-### 10. Clean up
+- Keep polling local. Do not delegate inbox polling.
+- Poll for `*_${AUTHOR}_review_addressed.yaml` every 30 seconds for up to 10 minutes.
+- When it arrives, refresh the diff and comments, then either reuse the current delegated reviewer with `send_input` or run a fresh delegated/local analysis.
 
-Delete processed inbox messages only after the terminal reply path succeeds.
+If the author never responds, print `STATUS: FEEDBACK_SENT_ROUND_<CURRENT_ROUND>` and stop.
 
-## Best Practices
+## 10. Clean up
 
-- Keep all Bash, Git, GitHub, and inbox operations in the leader session.
-- Treat helper analysis as read-only.
-- Use status-only PR comments.
-- Do not duplicate earlier findings already present in PR comments or inbox
-  packets.
-- Prefer a fresh `review_request` over a bare `review_addressed` when starting a
-  new stateless review round.
+At terminal exit:
+
+- Delete processed inbox messages only after the reply path succeeded.
+- Close any still-open delegated reviewer with `close_agent`.
+
+## Notes
+
+- Prefer the PR's real `baseRefName`; do not hardcode `main`.
+- Keep PR comments status-only. All detailed findings live in packets and inbox messages.
+- Same-account repos may not want `gh pr review --approve`; inbox `review_lgtm` plus a status comment is acceptable there.
+- Keep the packet-writing contract stable even when the analysis path changes.
+
+## Learned from runs
+
+- Codex reviewer delegation works best when the leader owns all protocol and shell state while the subagent only reasons over the diff and nearby files.
+- Reusing a prior delegated reviewer with `send_input` is useful for focused round-2 re-reviews, but it is not worth carrying stale agent state across unrelated rounds.
+- Tiny diffs often do not justify delegation; large or ambiguous diffs usually do.
