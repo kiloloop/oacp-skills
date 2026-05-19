@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.5.2] - 2026-05-19
+
+### Changed
+
+- `review-loop-author` skill (Claude Code runtime) — refreshed SKILL.md content. Hybrid split clarified as leader-handles-Bash-I/O + fix-only subagent (works around CC sandbox-in-Task breakage). Adds a mergeable precondition check; `task_id` review-state updates (`review_round`, `review_status`, `findings_packets`); `--body-file` + tempfile for all PR comments; generic GitHub-App auth note (per-command `http.extraheader` push pattern). Migrates from `python3 scripts/send_inbox_message.py` to `oacp send`.
+- `review-loop-reviewer` skill (Claude Code runtime) — refreshed SKILL.md content. Hybrid split clarified (leader Bash I/O + analysis-only `code-reviewer` subagent with Read + search-only Bash). Adds incremental round-to-round diff path for re-review focus; fork-aware `REPO` detection via `headRepositoryOwner`/`headRepository`; self-review guard for App-authored PRs; supplemental-context channel for external spec / design-doc / prior-findings paths. Migrates from `python3 scripts/send_inbox_message.py` to `oacp send`.
+- `review-loop-author` skill (Codex runtime) — refreshed SKILL.md content. Codex-native delegation idioms (`spawn_agent` / `send_input` / `wait_agent` / `close_agent`); `BASE_BRANCH` dynamically resolved from the PR rather than hardcoded; `repo_gh` wrapper with App-token-preferred + human-auth fallback; `workspace.json` marker fallback alongside `.oacp`. Migrates from `python3 scripts/send_inbox_message.py` to `oacp send`.
+- `review-loop-reviewer` skill (Codex runtime) — refreshed SKILL.md content. Mirrors the Claude slice: identical findings-packet contract (P0..P3, blocking, status, area, file, line, repro/expected/evidence/recommendation); three GitHub comment surfaces fetched (inline + reviews + issue); concise/status-only PR comments with sensitive-data exclusion rule. Migrates from `python3 scripts/send_inbox_message.py` to `oacp send`.
+
 ## [0.5.1] - 2026-05-18
 
 ### Added
@@ -66,6 +75,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill template for contributing new skills
 - CI validation workflow (skill.yaml schema, SKILL.md frontmatter, absolute path check)
 
+[0.5.2]: https://github.com/kiloloop/oacp-skills/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/kiloloop/oacp-skills/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/kiloloop/oacp-skills/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kiloloop/oacp-skills/compare/v0.3.0...v0.4.0
