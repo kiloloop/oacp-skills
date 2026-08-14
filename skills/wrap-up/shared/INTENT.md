@@ -33,12 +33,12 @@ The skill walks through eight steps in strict order. Steps are runtime-agnostic 
 ## Optional integrations
 
 - **`/debrief` skill** — preferred debrief target when installed.
-- **`oacp` CLI ≥ 0.3.0** — required for Step 3 (`oacp write-event`) and Step 6 (`oacp memory push`).
+- **`oacp` CLI ≥ 0.4.0** — required for Step 3 (`oacp write-event`) and Step 6 (`oacp memory push`).
 - **Cloned `kiloloop/cortex`** — set `$CORTEX_HOME` to enable the second-tier debrief target. Public repo: <https://github.com/kiloloop/cortex>.
 
 ## Acceptance criteria
 
-- Never force-deletes branches — uses `git branch -d` only, never `-D`.
+- Branch deletion is verification-gated: `git branch -d` for ancestry-merged branches; `-D` only when the branch tip exactly equals a merged PR's head SHA (squash-merge case). Unmerged or diverged branches are never deleted.
 - Never auto-deletes inbox messages — reports them only; user confirms deletion.
 - Never commits `.env`, credentials, secrets, or `settings.json` files.
 - Always pull-rebases before push (Step 7) to avoid conflicts with other runtimes.

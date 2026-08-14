@@ -1,0 +1,4 @@
+interface:
+  display_name: "OACP Review Reviewer"
+  short_description: "Review one exact OACP PR head and respond"
+  default_prompt: "Use $review-loop-reviewer to review one exact OACP PR head and send the terminal verdict."

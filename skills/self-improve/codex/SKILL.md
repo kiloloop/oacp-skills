@@ -1,310 +1,213 @@
 ---
 name: self-improve
-description: "Review and improve the agent's operating system - skills, memory files, and AGENTS.md configs. Identifies staleness, contradictions, gaps, and bloat, then proposes and applies fixes."
+description: "Audit and improve Codex operating guidance: skills, curated project memory, AGENTS.md, and relevant configuration. Use for explicit self-improve requests, routine wrap-up drift checks, stale or conflicting guidance, or an approved cleanup. Route release-wide OACP migrations and context-budget audits to audit-oacp-skills. Do not hand-edit generated Codex memories or installed plugin/system artifacts."
 ---
 
-# /self-improve - Agent Self-Improvement
+# Self-improve
 
-Structured review of the agent's configuration and knowledge layer. Identifies
-staleness, contradictions, gaps, and improvement opportunities. Proposes
-changes, applies them after approval, and commits only when requested.
+Audit the durable guidance layer, prove how it behaves in the active runtime,
+and apply only approved changes. Verify current capabilities from live evidence
+and official sources rather than hardcoding release or model names.
 
-## Arguments
+## Scope and depth
 
-- `/self-improve` - full review (session skills + memory + AGENTS.md)
-- `/self-improve skills` - review only skills that ran this session
-- `/self-improve memory` - review memory files only
-- `/self-improve agents-md` - review AGENTS.md files and settings only
-- `/self-improve config` - alias for `agents-md`
-- `/self-improve <skill-name>` - review a single specific skill
+| Request | Review scope |
+|---|---|
+| `$self-improve` | Skills used this session, curated project memory, AGENTS.md, and relevant config |
+| `$self-improve skills` | Skills actually used this session |
+| `$self-improve memory` | Curated project memory only |
+| `$self-improve agents-md`, `config`, or `claude-md` | AGENTS.md and relevant Codex config |
+| `$self-improve <skill-name>` | The named skill, its effective-state chain, and editable source |
+| Wrap-up caller | Session-delta targets first; broaden only on evidence of drift |
 
-## Instructions
+An explicit or natural-language self-improve request performs the requested
+scope. A wrap-up caller starts with skills used, guidance/memory/config changed,
+and failures, workarounds, conflicts, or discovery gaps observed this session.
+Do not turn routine wrap-up into a release-wide audit without such evidence.
 
-When the user runs `/self-improve`, execute these steps.
+Route major Codex model/app/CLI or OACP release migrations, multi-skill
+capability changes, and context-budget audits to `$audit-oacp-skills`. Route a
+changelog summary without guidance-impact analysis to `$codex-changelog`.
 
-### 1. Parse Target
+Treat audit, review, diagnosis, and report requests as read-only. A numbered
+approval authorizes only its listed local edits. Commit, push, PR, merge,
+messaging, and other external writes remain separate unless explicitly listed.
 
-Determine what to review based on the argument:
+## 1. Resolve targets and ownership
 
-| Argument | Review scope |
-| --- | --- |
-| (none) | skills + memory + AGENTS.md |
-| `skills` | Only skills that ran this session |
-| `memory` | Only memory files |
-| `agents-md` or `config` | Only AGENTS.md files + settings |
-| `<skill-name>` | That specific skill's SKILL.md |
+Use the active Skills catalog and exact locators first. Read every selected
+`SKILL.md` completely, then load only the references or scripts required for
+the selected scope.
 
-If the target is ambiguous, confirm the intended scope before editing.
+Classify each target before proposing edits:
 
-### 2. Discover Files
+- **Authored source:** editable only after approval.
+- **Symlinked skill or guidance:** edit the resolved source and name its repo.
+- **Installed artifact:** plugin cache, bundled/system skill, or provider
+  resource; inspect read-only and locate an authoring/update path.
+- **Cross-runtime namesake:** report drift without synchronizing another
+  runtime automatically.
 
-Build an inventory of all files to review based on the target scope. Prefer
-`rg` and `rg --files` for discovery. When `find` is needed, use `command find`
-so shell aliases do not interfere.
+Generated Codex memory under `${CODEX_HOME:-$HOME/.codex}/memories/` is
+generated state, not hand-maintained project memory. Do not hand-edit or apply
+line-budget trimming to it. Inspect configuration through an explicit key
+allowlist and redact tokens, credentials, environment values, and private
+endpoints. Never broadly search credential-adjacent config or session trees.
 
-#### Skills Discovery
+Load only the applicable section of
+[references/audit-checks.md](references/audit-checks.md) for detailed skill,
+curated-memory, or AGENTS/config checks.
 
-If scope includes skills:
+## 2. Prove effective state
 
-- Session skills: scan the conversation context for `/skill-name` invocations.
-  Only review skills that actually ran this session unless a specific
-  `<skill-name>` was given.
-- Specific skill: review it directly regardless of whether it ran this session.
+For every target, verify the relevant chain:
 
-Locate each skill's `SKILL.md` by checking these locations in order:
-
-1. Project-scoped: `./.codex/skills/<name>/SKILL.md`
-2. Global: `~/.codex/skills/<name>/SKILL.md`
-3. Public skills repo shape: `skills/<name>/codex/SKILL.md`
-4. Project-defined skill directories documented in the current repo's
-   `AGENTS.md`
-
-If the skill exists in multiple locations, note all copies and flag drift
-instead of assuming they are synchronized.
-
-#### Memory Discovery
-
-If scope includes memory, first resolve the current OACP project from `.oacp`
-or `workspace.json`:
-
-```bash
-PROJECT="$(python3 - <<'PY'
-import json
-import os
-
-project = ""
-for marker in (".oacp", "workspace.json"):
-    if not os.path.exists(marker):
-        continue
-    path = os.path.realpath(marker) if os.path.islink(marker) else marker
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        project = data.get("project_name", "") or ""
-    except Exception:
-        project = ""
-    if project:
-        break
-print(project)
-PY
-)"
-OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
+```text
+authored source -> discovery/configuration -> callers/dependents -> observed behavior
 ```
 
-Inspect whichever of these locations exist:
+Source validity alone is insufficient. Check applicable auxiliary metadata,
+canonical discovery paths, symlinks, manifests, hooks, setup generators, and
+direct skill/AGENTS callers within explicit authored roots. Run one live or
+test probe when available. Mark an unavailable probe as `unverified`; do not
+silently treat authored intent as effective behavior.
 
-1. Project-level `memory/` directory relative to the repo root
-2. OACP project memory at `$OACP_HOME/projects/<project>/memory/`
-3. Codex project memory at `~/.codex/projects/<project>/memory/`
+If a dependent is outside the approved scope, report it as follow-up instead of
+editing it. This step must catch valid-but-undiscoverable skills, stale caller
+syntax, generated configuration that differs from its source, and scripts whose
+documented effect is not observable.
 
-List files with:
+For current OpenAI/Codex behavior, use `$openai-docs` or `$codex-changelog` as
+appropriate. Capability-check unstable CLI surfaces and distinguish authored,
+configured, and runtime-observed states.
 
-```bash
-command find "<memory-dir>" -maxdepth 1 -type f -name '*.md' | sort
-```
+## 3. Analyze and capture acceptance evidence
 
-Check modification dates with:
-
-```bash
-command find "<memory-dir>" -maxdepth 1 -type f -name '*.md' | sort | while read -r f; do
-  python3 -c "import os,sys; st=os.stat(sys.argv[1]); print(int(st.st_mtime), sys.argv[1])" "$f"
-done
-```
-
-If a directory does not exist, note that and continue.
-
-#### AGENTS.md Discovery
-
-If scope includes AGENTS.md/config:
-
-- Global: `~/.codex/AGENTS.md` if it exists
-- Project: `./AGENTS.md` if it exists; check whether it is a symlink
-- Project settings: `.codex/config.toml`, `.codex/settings.json`,
-  `.codex/settings.local.json` if present
-
-If an AGENTS.md file is a symlink, inspect the resolved target and note the
-owning repo for any later commit.
-
-### 3. Analyze Skills
-
-For each skill in scope, check:
-
-- Post-run lessons: what worked, what broke, and whether repeatable patterns
-  should become durable instructions instead of another run note.
-- Contradictions with memory or config.
-- Missing safety rules for edge cases exposed by the run.
-- Outdated references: file paths, script names, argument flags, or repo URLs
-  that no longer match reality.
-- Local-only metadata: workstation-specific versions, local registry state, and
-  machine-local paths do not belong in general-purpose skill docs.
-- Multi-copy drift: compare copies and flag divergence.
-- Cross-runtime ownership: respect runtime namespaces. Do not edit another
-  runtime's wrapper directly; route that drift to the owning runtime or record a
-  follow-up.
-
-### 4. Analyze Memory
-
-For each memory file, check:
-
-- Staleness:
-  - 2 days for derived or snapshot files that drift quickly
-  - 14 days for authored working files updated by daily operations
-  - 30 days for stable reference files
-- Contradictions across memory files, AGENTS.md, and current session context.
-- Cross-file consistency for issue numbers, agent names, statuses, and active
-  threads.
-- Runtime split-brain: markers, AGENTS.md, skills, and memory should agree on
-  the canonical runtime root.
-- Session context drift: recent user statements should be reflected when they
-  change durable operating context.
-- Large memory/index files that are approaching platform truncation limits.
-- Task/decision hygiene when task or decision files exist: overdue items,
-  missing dates, completed items not archived, or decisions without rationale.
-
-Use staleness thresholds as signals, not automatic rewrite mandates.
-
-### 5. Analyze AGENTS.md
-
-For global and project AGENTS.md files, check:
-
-- Duplication between global and project instructions.
-- Contradictions between global, project, and settings files.
-- Runtime-root alignment with `.oacp`, `workspace.json`, and OACP memory paths.
-- Missing rules for patterns manually enforced multiple times in the session.
-- Bloat that can be trimmed without losing meaning.
-- Outdated references to agents, paths, tools, or commands.
-- Settings drift in `.codex/*` files.
-- Git credential hygiene: flag embedded credentials in remotes and prefer
-  per-command authentication according to the consuming repo's policy.
-
-### 6. Report Findings
-
-Present findings grouped by category. Use these severity tags:
+Use these tags:
 
 | Tag | Meaning |
-| --- | --- |
-| `[FIX]` | Clear bug or error that should be fixed |
-| `[STALE]` | Data is outdated |
-| `[GAP]` | Something is missing |
-| `[CONFLICT]` | Contradiction between files |
-| `[BLOAT]` | Unnecessary content that can be trimmed |
-| `[STRUCTURAL]` | Skill needs architectural work, not just a patch |
+|---|---|
+| `[FIX]` | Clear bug or incorrect instruction |
+| `[STALE]` | Time-sensitive content is outdated |
+| `[GAP]` | Required workflow, wiring, or safety coverage is missing |
+| `[CONFLICT]` | Sources or effective states disagree |
+| `[STRUCTURAL]` | The workflow needs architectural rather than surgical work |
+| `[BLOAT]` | Content can move or disappear without losing required behavior |
 
-Sort findings within each category in this order:
+Check trigger behavior, workflow inputs/outputs, stopping conditions, approval
+boundaries, safety, current paths/commands/config, ownership, duplication, run
+learnings, and validation. Promote repeatable run lessons with
+`$consolidate-learnings`; never append a second procedure as a learned log.
 
-`[FIX]` > `[CONFLICT]` > `[STRUCTURAL]` > `[GAP]` > `[STALE]` > `[BLOAT]`
+For every proposed change, define a before/after acceptance probe and capture
+its current result before editing. Use context measurement only when the
+finding concerns a hot-path skill, progressive disclosure, a release-wide
+migration, or a context budget. Reuse `$audit-oacp-skills` measurement with the
+same tokenizer for the comparison; routine correctness fixes do not require a
+token baseline.
 
-If a category has no findings, say so explicitly. Keep the report scannable by
-grouping obvious routine findings when separate bullets would not change the
-approval decision.
+## 4. Report and request approval
 
-### 7. Propose Changes
+Group findings by requested scope. For each finding provide the target and line
+when available, live evidence, impact, specific outcome, and acceptance probe.
+Say `No issues found` for an in-scope category with no findings.
 
-For each finding, propose a specific edit:
+End a changeable audit with a self-contained numbered menu containing:
 
-```text
-1. [FIX] example-skill/SKILL.md:52
-   File: ~/.codex/skills/example-skill/SKILL.md
-   Change: Replace the stale command with the current command from AGENTS.md.
-```
+- the recommended choice first when clear;
+- every proposed change number;
+- target files/repos and exact outcomes;
+- allowed replies: `all`, `none`, or item numbers;
+- whether commit, push, PR, messaging, or another external action is included.
 
-Ask:
+Do not edit before approval unless the original request already authorized the
+exact change.
 
-```text
-Which changes should I apply? (all / list numbers / none)
-```
+## 5. Apply and verify approved changes
 
-The approval prompt must be self-contained. Include:
+1. Re-read every live target and nearest `AGENTS.md`; confirm repo, branch,
+   status, ownership, and unrelated concurrent changes.
+2. Preserve user and other-agent work. In a shared skills repository, edit
+   only Codex-owned `codex/` or explicitly approved shared files.
+3. Keep installed/plugin/system/provider artifacts read-only. Coordinate with
+   another runtime only when messaging is authorized.
+4. Before editing OACP runtime memory, acquire the project's
+   `.memory-write.lock`; defer when another valid writer holds it and remove a
+   lock created by this run on exit.
+5. Apply only approved edits with `apply_patch`, inspect the diff, and confirm
+   the intended files changed.
+6. Re-run the exact acceptance probe captured before editing, followed by
+   proportional project-native validation. For a changed skill, run the skill
+   validator, check frontmatter and direct links, exercise representative
+   positive/negative triggers, and verify effective discovery when applicable.
+7. When context measurement was warranted, compare with the same tokenizer and
+   explain increases as well as reductions. Lower token count is not a
+   correctness result.
 
-- Recommended choice when one is clear
-- Every proposed change number
-- The target file or repo for each change
-- The exact outcome the user is approving
-- Allowed replies: `all`, `none`, or specific numbers
+For an OACP runtime-memory edit, use an explicit owner token because a shell
+`trap` cannot span separate Codex tool calls. Never remove a valid writer lock
+solely because it is old.
 
-For routine cleanup, group related edits into one approval item when that makes
-the decision easier.
-
-### 8. Apply Approved Changes
-
-For each approved change:
-
-1. Read the target file if it is not already loaded.
-2. Respect runtime namespaces; edit only files owned by Codex or shared files
-   whose ownership is clear.
-3. Before editing OACP runtime memory, acquire an advisory lock:
+Acquire before the first edit:
 
 ```bash
 LOCK_DIR="$OACP_ROOT/projects/${PROJECT}/.memory-write.lock"
-if [ -d "$LOCK_DIR" ]; then
-  LOCK_MTIME="$(python3 -c "import os,sys; print(int(os.stat(sys.argv[1]).st_mtime))" "$LOCK_DIR")"
-  LOCK_AGE=$(( $(date +%s) - LOCK_MTIME ))
-  if [ "$LOCK_AGE" -gt 600 ]; then
-    rmdir "$LOCK_DIR" 2>/dev/null
-  fi
-fi
+LOCK_OWNER_FILE="$(mktemp)"
+python3 - "$LOCK_OWNER_FILE" <<'PY'
+import datetime
+import json
+import secrets
+import socket
+import sys
+
+owner = {
+    "token": secrets.token_hex(16),
+    "host": socket.gethostname(),
+    "created_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+}
+with open(sys.argv[1], "w", encoding="utf-8") as handle:
+    json.dump(owner, handle)
+PY
+chmod 600 "$LOCK_OWNER_FILE"
 if mkdir "$LOCK_DIR" 2>/dev/null; then
-  trap 'rmdir "$LOCK_DIR" 2>/dev/null' EXIT
+  chmod 700 "$LOCK_DIR"
+  cp -- "$LOCK_OWNER_FILE" "$LOCK_DIR/owner"
+  chmod 600 "$LOCK_DIR/owner"
+  echo "Memory lock acquired"
 else
-  echo "Memory files locked by another runtime - defer those edits"
+  echo "Memory lock held by another writer; defer memory edits"
 fi
 ```
 
-Then continue:
-
-1. If the lock cannot be acquired, skip memory edits and report them as
-   deferred.
-2. Make the edit with a precise patch.
-3. Confirm the change was applied.
-4. Release the memory lock after memory edits:
+If acquisition fails, leave the existing directory untouched and defer all
+runtime-memory edits. Lock recovery requires separately proving the prior
+writer is gone; age alone is never proof. Release after the last edit,
+including an edit failure, only when the stored owner is byte-identical to this
+run's token:
 
 ```bash
-rmdir "$LOCK_DIR" 2>/dev/null
+if [ -d "$LOCK_DIR" ] && cmp -s "$LOCK_OWNER_FILE" "$LOCK_DIR/owner"; then
+  command rm -f -- "$LOCK_DIR/owner"
+  rmdir -- "$LOCK_DIR"
+else
+  echo "Memory lock ownership changed or was not acquired; refusing release"
+fi
+command rm -f -- "$LOCK_OWNER_FILE"
 ```
 
-### 9. Commit Changes Only When Requested
+## 6. Commit or publish only when requested
 
-Commit only when the user explicitly asks for commits. Otherwise, apply edits
-and report what changed.
+Commit, push, PR creation, merge, and messaging are separate actions. When
+explicitly requested, follow each owning repo's `AGENTS.md`, reconfirm its root,
+branch, and status, stage only approved files, and keep repositories
+independent. Runtime memory and unrelated untracked state are never included
+merely because guidance changed.
 
-Determine the correct repo for each file:
+## 7. Summarize
 
-- If AGENTS.md is a symlink, commit to the target repo, not the symlink path.
-- Runtime memory under `$OACP_HOME/projects/*/memory/` is usually not
-  git-tracked; edit in place and report it separately.
-- `~/.codex/projects/*/memory/` is usually not git-tracked; edit in place and
-  report it separately.
-- In a shared skills repo, keep commits scoped to the files owned by this
-  runtime or clearly shared files approved by the user.
+Report scope and sources, effective-state evidence, findings applied or
+deferred, files changed by owning repo, exact validation and before/after probe
+results, external-action state, and remaining risks.
 
-When commits are requested, group changes by repo and commit separately:
-
-```bash
-cd <repo-root>
-git status -sb
-git add <changed-files>
-git commit -m "self-improve: <summary of changes>"
-```
-
-Do not push unless explicitly asked.
-
-### 10. Summarize
-
-End with a concise summary:
-
-```text
-Self-improvement complete:
-- Reviewed: N skills, M memory files, K config files
-- Findings: X total (N fixed, M flagged for manual review)
-- Commits: [repo + commit hashes, or none]
-```
-
-## Notes
-
-- This skill reviews and applies surgical fixes; it does not wholesale rewrite
-  the operating system.
-- For stale files flagged for manual review, describe what looks outdated
-  without inventing current content.
-- Keep the report scannable. If there are many findings, group by file.
-- For repeated self-improve run lessons, promote durable guidance into the
-  relevant section instead of growing a second procedure log.
+Keep changes surgical. Do not invent current facts, hardcode ephemeral model or
+release details, or let an audit drift into unapproved runtime namespaces.

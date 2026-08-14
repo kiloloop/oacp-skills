@@ -47,14 +47,16 @@ Every inbox/outbox message is a YAML file with these fields:
 | `expires_at` | no | Expiration timestamp (ISO 8601 UTC, set via `oacp send --expires <duration>`). |
 | `channel` | no | Optional channel namespace. |
 | `context_keys` | no | Map of additional structured fields. |
+| `auth` | no | Detached-JWS auth trailer (Ed25519 message signature, oacp-cli v0.4.2+). Verified against receiver-local pins; under a receiver's `enforce` posture, messages that do not verify are quarantined instead of processed. |
 
 ## Lifecycle
 
 1. **Send** — sender writes the message to the recipient's `inbox/` AND a copy to the sender's own `outbox/` (audit trail).
-2. **Detect** — recipient discovers new messages by listing `inbox/` (one-shot) or by watching for filesystem deltas (`oacp watch`).
-3. **Process** — recipient acts on the message based on `type`. Auto-execute rules live in the runtime SKILL.md and the `/check-inbox` skill.
-4. **Reply** — for types that require a reply (`task_request`, `question`, `handoff`, `review_*`), the recipient sends a new message with `--parent-message-id` linking back to the original.
-5. **Delete** — recipient removes the file from `inbox/` after fully processing. The outbox copy on the sender's side remains as the durable record.
+2. **Detect** — recipient discovers new messages by listing `inbox/` (one-shot) or by watching for filesystem deltas (`oacp watch`; per-subscriber `--state-id` cursors let concurrent watchers each see every event).
+3. **Verify** — recipient checks the message's auth trailer against its pinned sender identities (`oacp verify`, v0.4.2+). Posture is per receiver: `warn` reports, `enforce` rejects-at-intake with a `dead_letter/` quarantine.
+4. **Process** — recipient acts on the message based on `type`. Auto-execute rules live in the runtime SKILL.md and the `/check-inbox` skill.
+5. **Reply** — for types that require a reply (`task_request`, `question`, `handoff`, `review_*`), the recipient sends a new message with `--parent-message-id` linking back to the original.
+6. **Archive** — after the required reply and terminal audit update, the recipient atomically moves the exact processed file, without overwriting, to the sibling `inbox/archive/` directory under its original filename (preserving bytes, mode, and mtime so signed-message evidence stays byte-identical). Before the move, recheck the live file against the accepted snapshot; on drift, collision, or archival failure the message stays pending in `inbox/`. Archival is the receiver-side claim that processing reached a terminal state; the sender's outbox copy is the sender-side record.
 
 ## Message types (semantics)
 

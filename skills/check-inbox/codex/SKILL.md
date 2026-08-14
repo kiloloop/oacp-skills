@@ -1,6 +1,6 @@
 ---
 name: check-inbox
-description: "Process the current Codex project inbox in a single pass. Use when triaging pending inbox YAML messages or handling notification/question/review-loop traffic through the OACP CLI. Honors OACP Phase 1 receiver autonomy (`always_pause` / `auto_review`) per the active OACP autonomy protocol."
+description: "Process the current Codex project's OACP inbox in one ordered pass. Use for notification, question, task, handoff, brainstorm, or review-loop traffic. Uses mode-aware verify-before-parse intake, immutable snapshots, receiver autonomy, typed replies, and fail-closed terminal archival."
 ---
 
 # /check-inbox - Codex Inbox Poller & Processor
@@ -23,9 +23,55 @@ current inbox and exit.
 
 Legacy watch-mode flags (`--watch`, `--interval`, `--max-empty-polls`,
 `--max-runtime-min`) are not supported in Codex. If the user asks for recurring
-polling, stop and tell them to use `/loop 2m /check-inbox` or another interval.
+monitoring, prefer a Codex heartbeat that runs one project-scoped watch/inbox
+step per wake. Use `/loop 2m /check-inbox` only when the user explicitly wants
+foreground polling or heartbeat automation is unavailable.
+
+For a new recurring watcher, capability-check both modern flags and use a
+stable subscriber cursor with one backlog replay:
+
+```bash
+WATCH_HELP="$(oacp watch --help 2>&1 || true)"
+if printf '%s' "$WATCH_HELP" | command grep -q -- '--state-id' \
+  && printf '%s' "$WATCH_HELP" | command grep -q -- '--since'; then
+  oacp watch --project "$PROJECT" --agent codex \
+    --state-id "codex-<stable-subscriber-id>" --since epoch \
+    --oacp-dir "$OACP_ROOT" --json
+else
+  oacp inbox "$PROJECT" --agent codex --oacp-dir "$OACP_ROOT" --json
+fi
+```
+
+Watch output is only a wake signal. A direct inbox snapshot is authoritative.
+With `--state-id`, duplicate delivery across concurrent subscribers is normal;
+confirm the reported path still exists before processing it.
 
 ## Workflow
+
+### 0. Verify the OACP runtime
+
+Require the current continuation-aware runtime before discovery:
+
+```bash
+command -v oacp >/dev/null 2>&1 || {
+  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.4.3'" >&2
+  exit 1
+}
+OACP_VERSION="$(oacp --version 2>&1)" || {
+  printf '%s\n' "$OACP_VERSION" >&2
+  exit 1
+}
+python3 - "$OACP_VERSION" <<'PY'
+import re
+import sys
+
+match = re.search(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1])
+if not match:
+    raise SystemExit(f"could not parse oacp version: {sys.argv[1]}")
+if tuple(int(part) for part in match.groups()) < (0, 4, 3):
+    raise SystemExit(f"oacp {sys.argv[1]} is older than required 0.4.3")
+PY
+```
 
 ### 1. Parse Arguments
 
@@ -75,7 +121,6 @@ Set:
 ```bash
 OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
 INBOX_JSON_FILE="$(mktemp)"
-trap 'rm -f "${INBOX_JSON_FILE}"' EXIT
 oacp inbox "${PROJECT}" --agent codex --oacp-dir "${OACP_ROOT}" --json >"${INBOX_JSON_FILE}"
 INBOX_DIR="$(python3 - "${INBOX_JSON_FILE}" <<'PY'
 import json
@@ -87,6 +132,7 @@ agents = report.get("agents") or []
 print((agents[0] if agents else {}).get("inbox_path", ""))
 PY
 )"
+command rm -f -- "${INBOX_JSON_FILE}"
 ```
 
 Verify `test -d "${INBOX_DIR}"`. If missing, report:
@@ -96,7 +142,7 @@ Inbox not found at ${OACP_ROOT}/projects/${PROJECT}/agents/codex/inbox.
 Check project name and OACP_HOME.
 ```
 
-### 3. Snapshot And Parse Messages
+### 3. Verify, Snapshot, And Parse Messages
 
 Use the CLI snapshot as the source of truth for pending files:
 
@@ -116,38 +162,131 @@ for agent in report.get("agents", []):
 PY
 ```
 
-Never recurse into subdirectories, including `processed/`.
+Never recurse into subdirectories, including `archive/`, `dead_letter/`, or
+legacy `processed/`.
 
-Parse each message with Python and PyYAML:
+Read the lister's `agents[0].verify_mode` before touching candidate message
+fields. That value is mechanism-owned discovery state:
+
+- `off` permits unsigned intake without cryptographic authority;
+- `warn` annotates verification but grants no authority;
+- `enforce` permits only signed-verified messages.
+
+Under `enforce`, a held row exposes only filesystem metadata. Never reconstruct
+or custom-parse its fields. If the lister does not report `verify_mode`, stop
+before parsing and ask for an OACP CLI/runtime at `>=0.4.3`; never silently
+downgrade enforcement.
+
+Route every candidate path through the bundled reader. It resolves the active
+installed OACP package, requires a top-level regular non-symlink inbox source,
+performs one bounded read, verifies before parsing, validates the current
+message schema, removes the auth trailer from the sanitized view, retains the
+accepted SHA-256, and writes the exact accepted bytes to a new mode-0600
+snapshot. Do not substitute a custom YAML parser or a live-path read:
 
 ```bash
-python3 - "$MSG_FILE" <<'PY'
+MESSAGE_TMP_DIR="$(mktemp -d)"
+chmod 700 "$MESSAGE_TMP_DIR"
+MESSAGE_SNAPSHOT_RAW="$MESSAGE_TMP_DIR/message.yaml"
+MESSAGE_VIEW_JSON="$MESSAGE_TMP_DIR/view.json"
+READER_RC=0
+python3 "$SKILL_DIR/scripts/read_verified_message.py" "$MSG_FILE" \
+  --project "$PROJECT" --receiver codex --oacp-dir "$OACP_ROOT" \
+  --snapshot-out "$MESSAGE_SNAPSHOT_RAW" --disposition-held \
+  >"$MESSAGE_VIEW_JSON" || READER_RC=$?
+```
+
+`SKILL_DIR` is the installed directory containing this `SKILL.md`; resolve it
+from the active skill catalog rather than a machine-specific source path.
+Interpret the reader result by exit code:
+
+- `0`: accepted. Require a nonempty `message_sha256`, a mode-0600
+  `snapshot_path`, an empty `validation_errors` list, and a message mapping.
+- `3`: held under enforce. Require `disposition: reject` and a nonempty
+  `quarantine_copy` under this receiver's `dead_letter/`. Report only path and
+  authentication/disposition metadata, retain the original inbox file, and do
+  not parse or route attacker-controlled fields.
+- `4`: current-schema validation failed. Report the validation errors and
+  retain the original inbox file.
+- any other nonzero result: operational failure. Report it and retain the
+  original inbox file.
+
+The held disposition calls canonical `intake_verify` with the original inbox
+path and the exact bytes accepted by the reader. It writes a mode-0600 evidence
+copy aside without moving or deleting the queued original. Manual
+`oacp verify --quarantine` against a temporary path is not equivalent and must
+not be used: it neither covers every enforce rejection nor targets the
+receiver's canonical dead-letter directory.
+
+Extract routing fields only from the sanitized JSON view:
+
+```bash
+python3 - "$MESSAGE_VIEW_JSON" <<'PY'
 import json
 import sys
-import yaml
-from pathlib import Path
 
-path = Path(sys.argv[1])
-msg = yaml.safe_load(path.read_text(encoding="utf-8"))
-if not isinstance(msg, dict):
-    raise ValueError("message is not a YAML mapping")
-keys = [
-    "id", "from", "type", "priority", "subject", "body",
-    "related_pr", "related_packet", "parent_message_id", "expires_at",
-    "autonomy_hint",
-]
-print(json.dumps({k: msg.get(k) for k in keys}))
+with open(sys.argv[1], encoding="utf-8") as handle:
+    view = json.load(handle)
+message = view.get("message")
+if not isinstance(message, dict):
+    raise ValueError("reader did not return an accepted message mapping")
+print(json.dumps(message, sort_keys=True))
 PY
 ```
 
-If PyYAML is unavailable, use Ruby's YAML parser as a fallback. If parsing
-fails or required fields are missing, report the message as malformed and keep
-it in the inbox.
+Set `ACCEPTED_MESSAGE_SHA256` from the reader result and independently confirm
+that `shasum -a 256 "$MESSAGE_SNAPSHOT_RAW"` matches it before acting. Never
+replace the accepted snapshot or digest with a later live-path read.
+
+Define explicit private-snapshot cleanup before routing. A shell `trap` cannot
+span separate Codex tool calls, so call this on every retained, rejected,
+failed, and successfully archived path:
+
+```bash
+oacp_snapshot_cleanup() {
+  command rm -f -- "$MESSAGE_SNAPSHOT_RAW" "$MESSAGE_VIEW_JSON"
+  rmdir -- "$MESSAGE_TMP_DIR" 2>/dev/null || true
+}
+```
 
 Expiry rule:
 
 - If `expires_at` exists and is in the past UTC, report and skip.
-- Do not delete expired messages automatically.
+- Do not archive expired messages automatically.
+
+Define terminal archival before any routing so every message path, including
+an LGTM-first path, can use it. The archive directory must already be a real
+directory provisioned by the workspace; processing never creates it:
+
+```bash
+oacp_archive() {  # oacp_archive <inbox_dir> <filename> <accepted_sha256>
+  local d="$1" f="$2" want="$3" live arch
+  [ -d "$d/archive" ] && [ ! -L "$d/archive" ] \
+    || { echo "RETAINED: archive/ missing or symlinked"; return 1; }
+  [ -f "$d/$f" ] && [ ! -L "$d/$f" ] \
+    || { echo "RETAINED: source missing or not a regular file"; return 1; }
+  live=$(shasum -a 256 "$d/$f" | awk '{print $1}') \
+    || { echo "RETAINED: digest read failed"; return 1; }
+  [ "$live" = "$want" ] \
+    || { echo "RETAINED: digest drift; re-verify before retry"; return 1; }
+  [ ! -e "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] \
+    || { echo "RETAINED: destination exists; never overwrite history"; return 1; }
+  command mv -n -- "$d/$f" "$d/archive/$f" \
+    || { echo "RETAINED: move failed"; return 1; }
+  [ ! -e "$d/$f" ] && [ ! -L "$d/$f" ] \
+    || { echo "ERROR: source path still present after move"; return 1; }
+  arch=$(shasum -a 256 "$d/archive/$f" 2>/dev/null | awk '{print $1}')
+  [ -f "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] \
+    && [ "$arch" = "$want" ] \
+    || { echo "ERROR: archived copy missing or digest mismatch"; return 1; }
+  echo "ARCHIVED: $d/archive/$f"
+}
+```
+
+The two-part post-move source check is mandatory: a dangling symlink passes a
+bare `! -e` test. Any failed precondition, drift, collision, move, source
+post-check, or archive identity check is a retained error, never permission to
+delete, overwrite, copy-and-unlink, or retry with another mechanism.
 
 ### 4. Receiver Autonomy
 
@@ -167,26 +306,41 @@ CONFIG_PATH="${INBOX_DIR%/inbox}/config.yaml"
   `auto_review`) and `THRESHOLDS=<autonomy.auto_review_thresholds>`.
 
 For gate-eligible message types (`task_request`, `question`,
-`brainstorm_request`, `brainstorm_followup`, `handoff`), read the package
-reference `../references/autonomy.md` before acting. That reference contains the
-full evaluator:
+`brainstorm_request`, `brainstorm_followup`, `handoff`) read the package's
+[Codex autonomy adapter](references/autonomy.md) before acting. On receivers
+with continuation-grant
+recognition enabled, also run its review-continuation adapter for
+`review_request` and for `review_addressed` only when the grant explicitly
+lists it. The reference contains the full 0.4.3 evaluator:
 
 1. Gate 1: message integrity and replay detection.
 2. Gate 2: declared `task_profile` and risk thresholds.
 3. Gate 3: deterministic hard stops and ambiguous file scope.
 4. Gate 4: runtime/workspace check.
 
-Every gate-eligible message writes an audit YAML under:
+Use the canonical checked-out autonomy evaluator when available; do not
+reimplement its reason codes or classifications. It owns granular threshold
+reasons, demotable versus non-demotable Gate-3 findings, `policy_auth`,
+continuation matching, and co-occurring reason codes. Every evaluated message
+writes a schema-version-2 audit YAML under:
 
 ```text
 agents/<receiver>/audit/autonomy_decisions/<YYYYMMDDTHHMMSSZ>_<message-id>.yaml
 ```
 
-Write `result.final_state: pending` immediately after gate evaluation, then
-update it after processing finishes. A partial audit is better than no audit.
+Require the audit's `message_sha256` to match
+`ACCEPTED_MESSAGE_SHA256`, then attach authentication by verifying
+`$MESSAGE_SNAPSHOT_RAW` with `--attach-audit`. Never attach from a reread live
+path or hand-shape `message_auth`. Preserve the evaluator-stamped
+`completion_kind` and admission `final_state`; do not compose `pending`.
+Terminal bookkeeping updates the same audit with measured actuals, checkpoint,
+completion time, reply id, and artifacts. A partial audit is better than no
+audit.
 
-Pure notification and lifecycle flows (`notification`, `review_lgtm`,
-`review_addressed`, `handoff_complete`) do not run autonomy gates.
+Pure notification and output lifecycle flows (`notification`, `follow_up`,
+`review_feedback`, `review_lgtm`, `handoff_complete`) do not run the four task
+gates. Review continuation is recognition of prior human run authority, not
+task admission.
 
 Verdicts:
 
@@ -195,6 +349,14 @@ Verdicts:
 - `paused`: `always_pause`, malformed config, missing profile, threshold
   exceedance, hard stop, replay, expiry, or runtime failure; use the paused
   handling path.
+
+For a `review_request`, dispatch without a per-round confirmation only when the
+canonical verdict is `auto_accepted` with
+`review_continuation_accepted`. Report and preserve its source audit/message
+and pass the accepted `permitted_side_effects` bound to the reviewer. Every
+other `review_continuation_*` result follows explicit confirmation. A recorded
+`review_continuation_head_mismatch` is advisory; the reviewer resolves and
+binds its verdict to the live full head.
 
 Hard stops are absolute. `autonomy_hint: auto_proceed` is advisory only and
 never overrides a pause.
@@ -206,6 +368,12 @@ if work expands beyond the declared `task_profile`. Notify the sender with a
 update the audit with `threshold_exceeded_post_accept`, and keep the original
 message for re-authorization.
 
+The shipped enforcement adapter is not available for Codex. Codex may inspect
+with `oacp envelope show`, but it must not compile, extend, or clear an
+envelope. Preserve `result.envelope_enforcement: none`. A human task approval
+and a standing continuation grant are separate decisions; never infer the
+latter.
+
 ### 5. Process One Message
 
 Before any action, tell the user what action is about to run, including the
@@ -213,18 +381,19 @@ autonomy verdict and reason codes for gate-eligible messages.
 
 | Message type | Verdict `auto_accepted` | Verdict `paused` or `MODE=always_pause` |
 | --- | --- | --- |
-| `notification` | Summarize to user. Delete after handling. | Same; gates do not apply. |
-| `task_request` | Execute immediately without prompting. Reply with `notification`; delete after successful handling. Threshold checkpoint applies. | Summarize and ask user approval before executing. If approved and completed, reply with `notification`; delete after send succeeds. If declined or blocked, keep or delete only according to the user's decision. |
-| `question` | Answer and reply with `notification` using `--in-reply-to <message_id>`; delete after send succeeds. | Draft answer; ask before non-trivial research; reply and delete after send succeeds. |
-| `brainstorm_request` | Research/answer, reply with `notification`, delete after send succeeds. `allow_without_task_profile` may apply. | Summarize and ask user approval before research; reply/delete only after completion. |
+| `notification` | Summarize to user. Archive after terminal handling. | Same; gates do not apply. |
+| `task_request` | Execute immediately without prompting. Reply with `notification`; archive only after genuine terminal completion. Threshold checkpoint applies. | Summarize and ask user approval before executing. If approved, complete and reply before archival. If declined, blocked, or externally waiting, retain unless the user's terminal decision says otherwise. |
+| `question` | Answer and reply with `notification` using `--in-reply-to <message_id>`; archive after delivery succeeds. | Draft answer; ask before non-trivial research; reply and archive after delivery succeeds. |
+| `brainstorm_request` | Research/answer, reply with `notification`, then archive. `allow_without_task_profile` may apply. | Summarize and ask user approval before research; reply/archive only after completion. |
 | `brainstorm_followup` | Process like `brainstorm_request` with updated constraints. | Summarize and ask user approval before continuing. |
-| `handoff` | Read context, send `handoff_complete`, delete after send succeeds. | Same, but ask before non-trivial follow-up work. |
-| `review_request` | Notify user and ask confirmation before invoking the reviewer-side review loop. | Same; review lifecycle is not governed by autonomy gates. |
+| `handoff` | Read context, send `handoff_complete`, then archive. | Same, but ask before non-trivial follow-up work. |
+| `review_request` | On exactly `review_continuation_accepted`, invoke one bounded reviewer round with the accepted permitted-effect scope; otherwise show the exact round/head/effects and ask for confirmation. Archive only after its terminal verdict path succeeds. | Show the exact request and ask before invoking one reviewer round. |
 | `review_feedback` | Notify user and ask confirmation before invoking the author-side review loop. | Same. |
 | `review_addressed` | Informational. If a newer same-PR `review_request` exists, merge this context into that re-review; otherwise report that the protocol expects a fresh `review_request` and keep unless the user explicitly requests manual re-review. | Same. |
-| `review_lgtm` | Report LGTM, then delete. | Same. |
-| `handoff_complete` | Summarize completion, then delete. | Same. |
-| Unknown | Report full message and ask how to handle it. Do not delete. | Same. |
+| `review_lgtm` | Route it to the retained author task; archive only at the author skill's terminal checkpoint. | Same. |
+| `handoff_complete` | Summarize completion, then archive. | Same. |
+| `follow_up` | Summarize and preserve any open parent context. Convert it to work only under the parent's existing approved scope or a fresh approval. | Same; gates do not apply. |
+| Unknown | Report the full sanitized snapshot and ask how to handle it. Do not archive. | Same. |
 
 If `related_pr` is missing for `review_request`, `review_feedback`,
 `review_addressed`, or `review_lgtm`, report and keep the file.
@@ -240,8 +409,8 @@ Nonterminal task wait rule:
 Notification acknowledgement rule:
 
 - If a `notification` asks for acknowledgement, ask the user whether to send a
-  receipt before deletion.
-- Delete only after the approved reply succeeds, or after the user explicitly
+  receipt before archival.
+- Archive only after the approved reply succeeds, or after the user explicitly
   declines a reply.
 
 Reply notification template:
@@ -270,21 +439,17 @@ oacp send "${PROJECT}" \
   --in-reply-to "${MSG_ID}"
 ```
 
-Delete after successful handling:
+After every required reply, audit update, state read-back, and side effect has
+succeeded, archive against the first accepted digest:
 
 ```bash
-if ! rm "${MSG_FILE}"; then
-  python3 - "${MSG_FILE}" <<'PY'
-from pathlib import Path
-import sys
-
-path = Path(sys.argv[1])
-if path.exists():
-    path.unlink()
-PY
-fi
-test ! -e "${MSG_FILE}"
+oacp_archive "$INBOX_DIR" "$(basename -- "$MSG_FILE")" \
+  "$ACCEPTED_MESSAGE_SHA256"
 ```
+
+Only after archival succeeds, or after a retained outcome has been fully
+reported, call `oacp_snapshot_cleanup`. A progress reply is not terminal
+completion, and successful sending alone does not prove archival.
 
 ### 6. Single-Pass Drain Loop
 
@@ -298,8 +463,10 @@ Process files using protocol ordering:
 Run one short drain loop:
 
 1. Snapshot with `oacp inbox "${PROJECT}" --agent codex --oacp-dir "${OACP_ROOT}" --json`.
-2. Build an ordered queue from parsed `priority`, `type`, and filename timestamp.
-3. Process each file using Steps 4 and 5.
+2. Run the bundled reader once per candidate. Disposition and report held or
+   invalid entries; keep accepted private snapshots for this pass.
+3. Build the accepted queue from each sanitized view's `priority`, `type`, and
+   filename timestamp, then process it using Steps 4 and 5.
 4. Re-scan once after the pass.
 5. If new files appeared during processing, run another pass.
 6. Exit once a re-scan is empty.
@@ -325,8 +492,10 @@ Retained: <count> (expired/malformed/unknown/awaiting-approval)
   `handoff` require explicit user approval unless Step 4 returned
   `auto_accepted`.
 - `review_request`, `review_feedback`, and manual `review_addressed` re-review
-  require explicit user confirmation before triggering review-loop skills.
-- Never delete messages that were not successfully processed.
+  require explicit user confirmation before triggering review-loop skills,
+  except an executed canonical `review_continuation_accepted` result whose
+  permitted-effect scope is passed unchanged to the reviewer.
+- Never archive messages that were not successfully and terminally processed.
 - Never process messages outside `agents/codex/inbox`.
 - Hard stops are absolute and can only be processed manually under paused rules
   after surfacing them to the user.
@@ -339,16 +508,17 @@ Approval and confirmation prompts must be self-contained. Include:
 - Numbered choices.
 - Message id/path and sender.
 - Exact side effects, including whether an inbox reply will be sent and whether
-  the message will be deleted.
+  the message will be archived.
 - Allowed replies, for example `1`, `2`, or `skip`.
 
 ## Notes
 
-- This skill is single-pass only. For recurring checks, prefer
-  `/loop 2m /check-inbox`.
-- `processed/` is legacy; do not move files there.
-- Sender writes both recipient inbox and sender outbox; recipient deletes the
-  inbox file after successful handling.
+- This skill is single-pass only. For recurring checks, prefer a project-scoped
+  Codex heartbeat; use `/loop 2m /check-inbox` as the foreground fallback.
+- `processed/` is legacy; terminal inbound history belongs in
+  `inbox/archive/`.
+- Sender writes both recipient inbox and sender outbox; recipient preserves the
+  exact handled inbox bytes through fail-closed archival.
 - Receiver autonomy is opt-in. With no `agents/<receiver>/config.yaml`, the
   skill behaves like the pre-autonomy version.
 - Spec authority: when the active OACP protocol and this skill disagree, fix

@@ -92,7 +92,7 @@ Present as three sections — `recent.md`, `decisions.md`, `rules.md`. For each 
 
 ### 5. Apply edits
 
-Use the `Edit` tool. Place new `decisions.md` entries under the correct `## YYYY-MM-DD` heading so chronological order is preserved (Step 7D will re-sort if not).
+Use the `Edit` tool. Place new `decisions.md` entries at the **top** of the file under a `## YYYY-MM-DD` heading so newest-first order is preserved (Step 7D will re-sort if not).
 
 ### 6. Update the markers
 
@@ -119,15 +119,15 @@ gh issue view <N> --repo <owner>/<repo> --json state,closedAt,updatedAt
 
 (Runtimes that sandbox the shell may need to allow `gh` for this step — configure that in your runtime's permissions, not in the skill body. If `gh` auth is missing, report the unchecked refs rather than inventing status.) Annotate stale claims inline rather than removing them, e.g. `Status: #15 still OPEN P3, not actioned`.
 
-**D. Chronological order in `decisions.md`.** Section headers must run **oldest-first, top-to-bottom** (new entries append at the bottom). Run the mechanical check — don't self-report:
+**D. Chronological order in `decisions.md`.** Section headers must run **newest-first, top-to-bottom** (new entries go at the top, so the freshest decisions are the first thing a reader — or a session-init load — sees). Run the mechanical check — don't self-report:
 
 ```bash
 command grep -nE '^## 20' $OACP_HOME/org-memory/decisions.md \
-  | awk '{print $2}' | sort -c
-# Exit 0 = order is correct. Non-zero = re-sort needed.
+  | awk '{print $2}' | sort -rc
+# Exit 0 = order is correct (descending). Non-zero = re-sort needed.
 ```
 
-If `sort -c` reports a disorder, re-sort with one Edit operation. The mechanical check is the verification — never substitute self-reporting. (A real false-clean was caught with this exact check when a newly-folded section had been prepended at the top while the rest of the file ran oldest-first.)
+If `sort -rc` reports a disorder, re-sort with one Edit operation. The mechanical check is the verification — never substitute self-reporting. (A real false-clean was caught with this exact check when a newly-folded section was placed at the wrong end of an otherwise-ordered file.)
 
 **E. Category drift.** Conventions filed under `decisions.md` should move to `rules.md`, and vice versa. Decisions are architectural calls; rules are standing conventions. If unclear, default to leaving where the historical event-author put it.
 
@@ -157,7 +157,7 @@ Let the user run the commit; the skill never commits automatically.
 - **Don't auto-commit.** The user reviews and decides commit timing.
 - **Don't touch sibling memory trees** (project-scoped memory directories). Read-only from this skill's perspective.
 - **Don't drop the marker.** It's the cheapest performance optimization in this flow.
-- **Don't replace the Step 7D `sort -c` check with a prose claim.** Self-reported "chronological order looks fine" misses real false-cleans. Run the mechanical check.
+- **Don't replace the Step 7D `sort -rc` check with a prose claim.** Self-reported "chronological order looks fine" misses real false-cleans. Run the mechanical check.
 
 ## Workarounds
 

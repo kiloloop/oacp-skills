@@ -5,7 +5,7 @@ description: Run environment and workspace diagnostics, auto-fix what it can, an
 
 # /doctor — Environment & Workspace Diagnostics
 
-Run `oacp doctor` to check environment health, workspace structure, inbox state, YAML schemas, and agent status. Auto-fixes safe issues and reports blockers that need human intervention.
+Run `oacp doctor` to check environment health, workspace structure, inbox state, YAML schemas, autonomy configs, agent status, and signing trust roots. Auto-fixes safe issues and reports blockers that need human intervention.
 
 ## Arguments
 
@@ -27,7 +27,7 @@ Before anything else, check that the CLI is available:
 command -v oacp >/dev/null 2>&1 || echo "NOT_FOUND"
 ```
 
-If not found, report immediately: "oacp CLI not found. Install: `pip install oacp-cli`" and stop.
+If not found, report immediately: "oacp CLI not found. Install: `pip install 'oacp-cli[crypto]'`" and stop. (The `[crypto]` extra enables the signing/trust checks; the base install runs everything else.)
 
 ### 2. Resolve project name
 
@@ -107,6 +107,17 @@ The `--fix` flag auto-fixes these safe issues:
 
 Fixed results appear as `ok` in the output with updated messages. The `fixed` array lists what was changed — it will be empty on a healthy workspace where nothing needs fixing.
 
+**Check categories (oacp-cli v0.4.x):**
+
+- **Environment** — required tools (git, gh, python, pyyaml) on PATH and importable
+- **Workspace** — `workspace.json` valid, `agents/` present; per-agent profile completeness (an agent is more than a bare-`mkdir` inbox — config, status, audit scaffold)
+- **Inbox Health** — message counts, oldest-message staleness
+- **Schemas** — inbox/outbox message YAML validates against the protocol schema
+- **Autonomy** — receiver `config.yaml` autonomy blocks parse and validate; signed policies verify (`policy_auth`), so a tampered policy is caught before the gate trusts it
+- **Agent Status** — `status.yaml` presence and staleness per agent
+- **Trust** (v0.4.1+) — signing trust-root health: catalog-vs-pins drift, per-receiver pin-completeness gaps, and enforce-readiness (every catalog identity carrying an active pin) for receivers configured with `verify_mode: enforce`
+- **Memory Sync** (with `--memory`) — advisory checks on the OACP_HOME memory git sync
+
 ### 5. Report results
 
 Present a structured report to the user:
@@ -134,7 +145,7 @@ Auto-fixed: 2 issue(s) | Remaining: 1 warning(s), 2 error(s)
 **Reporting rules:**
 
 - List auto-fixes first (from the `fixed` array) so the user sees what changed
-- Group remaining issues by category: Environment, Workspace, Inbox Health, Schemas, Agent Status
+- Group remaining issues by category: Environment, Workspace, Inbox Health, Schemas, Autonomy, Agent Status, Trust
 - Include `fix_hint` for all warn/error results that have one — note that `fix_hint` text comes from the CLI and may reference `make init` or `oacp init` depending on the context
 - If no issues were found at all, report: "No issues found. Environment and workspace are healthy."
 - `ok` and `skip` results are not shown individually — only the category summary
@@ -147,6 +158,8 @@ If there are remaining errors, suggest the most impactful fix first:
 - Missing workspace: `oacp init <project>`
 - Invalid YAML: which file to fix and what's wrong
 - Stale inbox messages: suggest running `/check-inbox` to process them
+- Trust-pin gaps on an enforce-posture receiver: `oacp trust import <kid>.pub.json --project <project> --agent <receiver>` for each missing peer — under `verify_mode: enforce`, an unpinned peer's messages quarantine instead of processing
+- Invalid policy signature (`policy_auth: invalid`): re-sign the receiver's policy (`oacp trust sign-policy`) after confirming the config change was intentional
 
 If all checks pass (including after auto-fixes), confirm the environment is ready.
 

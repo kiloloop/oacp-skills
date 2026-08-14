@@ -1,16 +1,16 @@
 ---
 name: oacp
-description: Use the OACP CLI and protocol from Codex to coordinate agents through inbox/outbox messages, task dispatch, review loops, and project memory.
+description: Use the OACP CLI and protocol from Codex to coordinate agents through signed inbox/outbox messages, task dispatch, review loops, and project memory.
 ---
 
 # OACP
 
-Run this version gate first. If `oacp` is missing or older than `0.3.0`, stop
-and tell the user to install or upgrade `oacp-cli` before continuing.
+Run this version gate first. If `oacp` is missing or older than `0.4.2`, stop
+and tell the user to install or upgrade `oacp-cli[crypto]` before continuing.
 
 ```bash
 if ! command -v oacp >/dev/null 2>&1; then
-  echo "oacp CLI not found; install oacp-cli >= 0.3.0" >&2
+  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.4.2'" >&2
   exit 1
 fi
 
@@ -25,10 +25,15 @@ match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
 if not match:
     raise SystemExit(f"could not parse oacp version: {version}")
 parts = tuple(int(part) for part in match.groups())
-if parts < (0, 3, 0):
-    raise SystemExit(f"oacp {version} is older than required 0.3.0")
+if parts < (0, 4, 2):
+    raise SystemExit(f"oacp {version} is older than required 0.4.2")
 PY
 ```
+
+Install or upgrade with `pip install --upgrade 'oacp-cli[crypto]>=0.4.2'`
+(or `uv tool install --upgrade 'oacp-cli[crypto]'`). The crypto extra enables
+message signing, verification, and trust checks used by the coordination
+skills.
 
 OACP is a filesystem coordination protocol. Use the installed `oacp` command
 as the primary interface, and use the public
@@ -85,9 +90,12 @@ parse processed archives unless the user asks.
 oacp inbox "${PROJECT}" --agent codex --oacp-dir "${OACP_ROOT}" --json
 ```
 
-When handling a message, parse the YAML, inspect `id`, `from`, `type`,
-`priority`, `subject`, `body`, `related_pr`, `parent_message_id`, and
-`expires_at`, then follow the protocol for that type.
+Treat the inbox listing as discovery, not as permission to custom-parse a live
+path. Route each candidate through `/check-inbox`: it captures one immutable
+snapshot, verifies before parsing, retains the accepted SHA-256, and enforces
+the receiver's `off`, `warn`, or `enforce` posture. Under `enforce`, anything
+other than signed-verified is held or quarantined in `dead_letter/` without
+surfacing attacker-controlled fields.
 
 Keep these routing defaults:
 
@@ -99,7 +107,8 @@ Keep these routing defaults:
   repo's merge policy.
 - Unknown, malformed, or expired messages: report and leave them in the inbox.
 
-Delete an inbox file only after its handling path succeeds.
+Archive a processed inbox file only after its handling path succeeds and its
+live digest still matches the accepted snapshot.
 
 ## Send
 
@@ -140,12 +149,42 @@ For recurring checks, use the user's runtime loop support or one shell loop.
 Do not spend repeated LLM turns polling the same wait state.
 
 ```bash
-oacp watch --project "${PROJECT}" --agent codex --oacp-dir "${OACP_ROOT}" --json --since now
+oacp watch --project "${PROJECT}" --agent codex \
+  --state-id "codex-<stable-subscriber-id>" --since epoch \
+  --oacp-dir "${OACP_ROOT}" --json
 ```
 
-Use `--since epoch` only when you intentionally need to replay existing inbox
-messages. Use `--show-archived` only when archive/delete events are part of the
-task; it is noisy when watching your own inbox.
+`--state-id` (v0.4.0+) gives each subscriber an independent cursor. Use
+`--since epoch` when creating a cursor so existing backlog wakes the first pass;
+it has no effect after that cursor exists. Duplicate delivery across concurrent
+subscribers is expected, so confirm the file still exists before processing.
+Use `--show-archived` only when archive events are part of the task; it is noisy
+when watching your own inbox.
+
+## Signing and trust (v0.4.2+)
+
+OACP messages may carry a detached-JWS Ed25519 auth trailer. Signing is
+sender-controlled; verification posture is receiver-controlled:
+
+```bash
+oacp key gen --agent codex --oacp-dir "${OACP_ROOT}"
+oacp key list --agent codex --oacp-dir "${OACP_ROOT}"
+oacp trust import <kid>.pub.json --project "${PROJECT}" --agent codex \
+  --oacp-dir "${OACP_ROOT}"
+oacp trust list --project "${PROJECT}" --oacp-dir "${OACP_ROOT}"
+oacp trust sign-policy --project "${PROJECT}" --agent codex \
+  --oacp-dir "${OACP_ROOT}"
+oacp verify <message.yaml> --project "${PROJECT}" --receiver codex \
+  --oacp-dir "${OACP_ROOT}"
+```
+
+- `signing.verify_mode: warn` annotates verification but grants no authority.
+- `signing.verify_mode: enforce` accepts only signed-verified intake; other
+  outcomes fail closed and processing evidence is quarantined to
+  `dead_letter/`.
+- Attach authentication to an existing autonomy audit with
+  `oacp verify <snapshot> ... --attach-audit <audit.yaml>`; never hand-write
+  `message_auth`.
 
 ## Review Loops
 
@@ -162,6 +201,11 @@ Author flow:
    it is not the trigger for a stateless reviewer invocation.
 6. Merge only after `review_lgtm`, required checks are green, and the repo's
    merge policy is satisfied.
+
+Continuation grants (v0.4.3+) may authorize later reviewer invocations in one
+same-thread PR loop. They authorize running the round, not its verdict, GitHub
+effects, or merge. The reviewer still enforces exact-head, quality, budget, and
+permitted-side-effect guards.
 
 Reviewer flow:
 
@@ -230,6 +274,12 @@ Request review for a PR:
 PR_NUMBER="123"
 BRANCH="$(git branch --show-current)"
 DIFF_SUMMARY="$(git diff --stat "origin/main...${BRANCH}" | sed 's/^/  /')"
+CONVERSATION_SEQUENCE="$(python3 - <<'PY'
+import time
+print(time.time_ns() % 1_000_000)
+PY
+)"
+CONVERSATION_ID="conv-$(date -u +%Y%m%d)-codex-${CONVERSATION_SEQUENCE}"
 BODY_FILE="$(mktemp)"
 cat > "${BODY_FILE}" <<EOF
 pr: ${PR_NUMBER}
@@ -238,6 +288,13 @@ diff_summary: |
 ${DIFF_SUMMARY}
 max_turns_reviewer: 8
 max_runtime_s_reviewer: 600
+repo: <owner/repo>
+round: 1
+declared_head: <full-head-sha>
+side_effects:
+  - writes_findings_packet
+  - sends_oacp_reply
+  - submits_github_review
 EOF
 
 oacp send "${PROJECT}" \
@@ -246,9 +303,23 @@ oacp send "${PROJECT}" \
   --type review_request \
   --subject "Review: PR #${PR_NUMBER}" \
   --body-file "${BODY_FILE}" \
+  --conversation-id "${CONVERSATION_ID}" \
   --related-pr "${PR_NUMBER}" \
   --priority P1 \
   --oacp-dir "${OACP_ROOT}" \
   --dry-run \
   --json
 ```
+
+Generate the numeric sequence once (at most six digits), keep the resulting
+conversation ID unchanged across every round and reply in this review thread,
+and create a fresh ID only for a genuinely new thread. Declare
+`submits_github_review` only when a
+formal GitHub approval is intended and authorized; declare
+`comments_on_github` separately when a status comment is also intended.
+
+Recipients archive terminally processed inbox messages under the original
+filename in `inbox/archive/` with a digest-checked, no-clobber move. Pending,
+expired, malformed, held, approval-gated, drifted, or collision cases stay in
+`inbox/`; plain deletion and legacy `processed/` moves lose receiver-side
+evidence and are not protocol-compliant.

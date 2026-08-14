@@ -1,6 +1,6 @@
 # wrap-up
 
-End-of-session cleanup, optional debrief, self-improve, commit, and push in one command. Run `/wrap-up` once at the end of a working session to leave a clean tree, durable memory, and an up-to-date remote.
+End-of-session cleanup, debrief, significant org-memory events, delta-first self-improve, and bounded publication in one command.
 
 ## Prerequisites
 
@@ -16,12 +16,14 @@ End-of-session cleanup, optional debrief, self-improve, commit, and push in one 
 
 ```bash
 # Claude Code
-mkdir -p .claude/skills/wrap-up
+mkdir -p .claude/skills/wrap-up/scripts
 cp skills/wrap-up/claude/SKILL.md .claude/skills/wrap-up/SKILL.md
+cp skills/wrap-up/scripts/cleanup_branches.sh .claude/skills/wrap-up/scripts/
 
 # Codex
-mkdir -p .agents/skills/wrap-up
-cp skills/wrap-up/codex/SKILL.md .agents/skills/wrap-up/SKILL.md
+mkdir -p .agents/skills/wrap-up/scripts
+cp -R skills/wrap-up/codex/. .agents/skills/wrap-up/
+cp skills/wrap-up/scripts/cleanup_branches.sh .agents/skills/wrap-up/scripts/
 ```
 
 ## Usage
@@ -36,12 +38,11 @@ cp skills/wrap-up/codex/SKILL.md .agents/skills/wrap-up/SKILL.md
 **Hard:**
 
 - `/self-improve` skill (Step 4) — install from `skills/self-improve/` in this same repo. The skill fails with an install hint if `/self-improve` is missing.
+- `oacp` CLI ≥ 0.4.2 — required for mode-aware inbox reporting, event writing, and memory publication.
 
 **Optional:**
 
-- `oacp` CLI ≥ 0.3.0 — needed for Step 3 (`oacp write-event`) and Step 6 (`oacp memory push`). Without it, those steps are skipped.
 - `/debrief` skill — preferred Step 2 target when installed.
-- Cloned `kiloloop/cortex` (set `$CORTEX_HOME`) — second-tier Step 2 target. Public repo: <https://github.com/kiloloop/cortex>.
 
 ## Customization
 
@@ -50,17 +51,16 @@ Environment variables consulted by the skill:
 | Variable | Purpose | Default |
 |----------|---------|---------|
 | `OACP_HOME` | Root for inbox, org-memory, and memory-sync paths | `$HOME/oacp` |
-| `CORTEX_HOME` | Clone of `kiloloop/cortex` for Step 2 fallback | unset |
 
 ## How it works
 
-1. **Cleanup** — remove just-merged PR worktrees; delete merged local branches (safe `-d` only); prune stale worktrees; report processed inbox messages.
-2. **Debrief (optional)** — `/debrief` skill, else `$CORTEX_HOME`, else `./.oacp/debriefs/YYYY-MM-DD.md`. Non-fatal.
+1. **Cleanup** — preview first; remove only verified local branches/worktrees; report pending and held inbox messages.
+2. **Debrief** — invoke `/debrief`; failure is visible but non-fatal.
 3. **Org-memory events** — `oacp write-event` for outcomes other agents care about.
-4. **Self-improve** — full review, pause for approval, apply approved changes.
-5. **Commit current repo** — explicit staging, secrets excluded.
+4. **Self-improve** — session-delta audit, pause for approval, apply approved changes.
+5. **Commit bounded repos** — explicit staging, unrelated and sensitive state excluded.
 6. **OACP memory sync** — `oacp memory push` if the marker is present.
-7. **Pull-rebase + push** — current branch.
+7. **Pull-rebase with autostash + push** — each authorized repository independently.
 8. **Summary** — structured status block.
 
-See [`shared/INTENT.md`](shared/INTENT.md) for the runtime-agnostic contract and acceptance criteria, and [`claude/SKILL.md`](claude/SKILL.md) for the Claude Code runtime instructions.
+See [`shared/INTENT.md`](shared/INTENT.md) for the runtime-agnostic contract, [`claude/SKILL.md`](claude/SKILL.md) for Claude Code, and [`codex/SKILL.md`](codex/SKILL.md) for Codex.

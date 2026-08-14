@@ -6,8 +6,8 @@ description: Run environment and workspace diagnostics, auto-fix what it can, an
 # /doctor
 
 Run `oacp doctor` to check environment health, workspace structure, inbox
-state, YAML schemas, and agent status. Auto-fix safe issues and report
-blockers that still need human intervention.
+state, YAML schemas, autonomy configs, agent status, and signing trust roots.
+Auto-fix safe issues and report blockers that still need human intervention.
 
 ## Interface
 
@@ -19,7 +19,40 @@ blockers that still need human intervention.
 
 ## Workflow
 
-### 1. Resolve project name
+### 1. Verify the CLI version
+
+Before anything else, require the signing-capable OACP version declared by this
+package (`>=0.4.2`):
+
+```bash
+command -v oacp >/dev/null 2>&1 || {
+  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.4.2'" >&2
+  exit 1
+}
+OACP_VERSION="$(oacp --version 2>&1)" || {
+  printf '%s\n' "$OACP_VERSION" >&2
+  exit 1
+}
+printf '%s\n' "$OACP_VERSION"
+python3 - "$OACP_VERSION" <<'PY'
+import re
+import sys
+
+version = sys.argv[1].strip()
+match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
+if not match:
+    raise SystemExit(f"could not parse oacp version: {version}")
+if tuple(int(part) for part in match.groups()) < (0, 4, 2):
+    raise SystemExit(f"oacp {version} is older than required 0.4.2")
+PY
+```
+
+If the reported version is older than `0.4.2`, stop and ask the user to install
+or upgrade with `pip install --upgrade 'oacp-cli[crypto]>=0.4.2'`. The base
+install can run ordinary checks, but the `[crypto]` extra is required for the
+signing and trust inventory described below.
+
+### 2. Resolve project name
 
 If `--project` was provided, use it directly. Otherwise auto-detect:
 
@@ -50,24 +83,35 @@ OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
 If `PROJECT` is empty, run environment-only checks unless the user explicitly
 asked for a specific project audit.
 
-### 2. Run oacp doctor with --fix
+### 3. Run oacp doctor with --fix
 
-With a project:
+Capture stdout, stderr, and the exit code separately so malformed JSON or an
+operational crash cannot be mistaken for a diagnostic finding. With a project:
 
 ```bash
-oacp doctor --project "${PROJECT}" --fix --json 2>/dev/null
+DOCTOR_JSON="$(mktemp)"
+DOCTOR_STDERR="$(mktemp)"
+DOCTOR_RC=0
+oacp doctor --project "${PROJECT}" --oacp-dir "${OACP_ROOT}" \
+  --fix --json >"${DOCTOR_JSON}" 2>"${DOCTOR_STDERR}" || DOCTOR_RC=$?
 ```
 
 Without a project:
 
 ```bash
-oacp doctor --json 2>/dev/null
+DOCTOR_JSON="$(mktemp)"
+DOCTOR_STDERR="$(mktemp)"
+DOCTOR_RC=0
+oacp doctor --oacp-dir "${OACP_ROOT}" --json \
+  >"${DOCTOR_JSON}" 2>"${DOCTOR_STDERR}" || DOCTOR_RC=$?
 ```
 
-Capture stdout JSON and the exit code. Exit code `1` means doctor found
-blocking errors, not that the command itself failed.
+Exit code `1` means doctor found blocking errors, not that the command itself
+failed. Require `$DOCTOR_JSON` to parse as a JSON object. On invalid JSON or an
+unexpected exit code, report the captured stderr and stop instead of
+fabricating a report. Remove both private temp files after parsing/reporting.
 
-### 3. Parse JSON output
+### 4. Parse JSON output
 
 Parse:
 
@@ -80,7 +124,21 @@ Parse:
 The `fixed` array lists safe changes already applied by `oacp doctor --fix`.
 Do not reimplement those fixes in the skill.
 
-### 4. Report findings
+The OACP 0.4.x inventory includes:
+
+- **Environment** — required tools and Python packages
+- **Workspace** — `workspace.json`, agent directories, and per-agent profile
+  completeness (config, status, and audit scaffold)
+- **Inbox Health** — message counts and oldest-message staleness
+- **Schemas** — inbox/outbox message validation
+- **Autonomy** — receiver policy parsing and signed-policy verification
+  (`policy_auth`)
+- **Agent Status** — `status.yaml` presence and freshness
+- **Trust** (v0.4.1+) — catalog/pin drift, receiver pin completeness, and
+  enforce-readiness
+- **Memory Sync** (with `--memory`) — advisory checks for the OACP memory repo
+
+### 5. Report findings
 
 ```text
 ## Doctor Report
@@ -109,7 +167,7 @@ Reporting rules:
 - Build the summary from the parsed category severities after `--fix`, not from
   a stale pre-fix snapshot
 
-### 5. Recommend next steps
+### 6. Recommend next steps
 
 Prioritize the most impactful remaining fix:
 
@@ -117,6 +175,10 @@ Prioritize the most impactful remaining fix:
 - Missing workspace: `oacp init <project>`
 - Invalid YAML: file path and error details
 - Stale inbox: suggest processing with `/check-inbox`
+- Trust-pin gaps on an enforce receiver: import each missing peer with
+  `oacp trust import <kid>.pub.json --project <project> --agent <receiver>`
+- Invalid policy signature (`policy_auth: invalid`): confirm the policy change,
+  then re-sign it with `oacp trust sign-policy`
 
 ## Notes
 

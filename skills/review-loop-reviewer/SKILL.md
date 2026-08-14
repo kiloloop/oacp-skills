@@ -100,10 +100,40 @@ Store the contents as `MEMORY_CONTEXT` (summarize to key points if very long).
 command ls -1 "${INBOX_DIR}/" 2>/dev/null | command grep '\.yaml$'
 ```
 
-Look for files matching `*_<AUTHOR>_review_request.yaml`. If found, read the matching file with the Read tool and extract: PR number, branch, diff_summary, task_id, review_round. Then delete it:
+Look for files matching `*_<AUTHOR>_review_request.yaml`. If found, verify it before processing (oacp-cli v0.4.2+):
 
 ```bash
-rm "${INBOX_DIR}/<filename>"
+oacp verify "${INBOX_DIR}/<filename>" --project "${PROJECT}" --receiver <agent_name> --oacp-dir "${OACP_HOME}"
+```
+
+Under a receiver `enforce` posture, process only `signed-verified` requests; an invalid or unsigned-from-a-pinned-sender request is surfaced and held, never reviewed. Then read the matching file with the Read tool and extract: PR number, branch, diff_summary, task_id, review_round (spec alias `round`), and the declared head SHA if present (`declared_head`, legacy `requested_head`).
+
+**Do not remove the request yet** — record `ACCEPTED_SHA=$(shasum -a 256 "${INBOX_DIR}/<filename>" | awk '{print $1}')` and leave it in place; it is consumed only after the terminal verdict is delivered (a crash mid-round then leaves it pending for clean re-dispatch). After the terminal `oacp send` and any required GitHub action succeed, archive it with the fail-closed helper below (protocol terminal archival — digest-checked, no-clobber, byte-preserving, never plain `rm`). Every guard fails closed: a failed check returns without moving anything, and the message stays pending in `inbox/`. The `archive/` directory is provisioned by workspace init/migration, never created during message processing:
+
+```bash
+oacp_archive() {  # oacp_archive <inbox_dir> <filename> <accepted_sha256>
+  local d="$1" f="$2" want="$3" live arch
+  [ -d "$d/archive" ] && [ ! -L "$d/archive" ] \
+    || { echo "RETAINED: archive/ missing or symlinked — provision via workspace migration"; return 1; }
+  [ -f "$d/$f" ] && [ ! -L "$d/$f" ] \
+    || { echo "RETAINED: source missing or not a regular file"; return 1; }
+  live=$(shasum -a 256 "$d/$f" | awk '{print $1}') \
+    || { echo "RETAINED: digest read failed"; return 1; }
+  [ "$live" = "$want" ] \
+    || { echo "RETAINED: digest drift — re-verify before any further processing"; return 1; }
+  [ ! -e "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] \
+    || { echo "RETAINED: destination exists — never overwrite history"; return 1; }
+  mv -n "$d/$f" "$d/archive/$f" \
+    || { echo "RETAINED: move failed"; return 1; }
+  [ ! -e "$d/$f" ] && [ ! -L "$d/$f" ] \
+    || { echo "ERROR: source path still present after move (skipped move or concurrent re-creation) — inspect before retry"; return 1; }
+  arch=$(shasum -a 256 "$d/archive/$f" 2>/dev/null | awk '{print $1}')
+  [ -f "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] && [ "$arch" = "$want" ] \
+    || { echo "ERROR: archived copy missing or digest mismatch — inspect before retry"; return 1; }
+  echo "ARCHIVED: $d/archive/$f"
+}
+
+oacp_archive "${INBOX_DIR}" "<filename>" "$ACCEPTED_SHA"
 ```
 
 Set `CURRENT_ROUND` from the review_request `review_round` field (default 1).
@@ -128,15 +158,18 @@ ISSUE_COMMENTS=$(gh api repos/<REPO>/issues/<PR_NUMBER>/comments --jq '.[].body'
 
 Combine into `EXISTING_COMMENTS`.
 
-#### 4d. Fetch full diff
+#### 4d. Fetch full diff and bind the reviewed head
 
 ```bash
 cd <REPO_PATH>
 git fetch origin <BRANCH>
+REVIEWED_HEAD=$(git rev-parse "origin/<BRANCH>")   # full SHA, verbatim — never hand-typed or truncated
 DIFF_TEXT=$(git diff main...origin/<BRANCH>)
 ```
 
 Store the full diff as `DIFF_TEXT`.
+
+**Head binding (record-and-resolve)**: the live `REVIEWED_HEAD` from `rev-parse` is authoritative; a `declared_head` / `requested_head` from the review_request is untrusted sender context, never a precondition. Compare the two by exact full-string equality — on mismatch do NOT stop or ask for a fresh round: record the mismatch (declared vs live values, as a non-blocking note in the findings and the terminal reply), then review the live head and bind the verdict to it. Only genuine drift DURING the round (the live head changing between fetch and verdict) aborts for a fresh round.
 
 #### 4e. Fetch PR title and body
 
@@ -339,7 +372,17 @@ After the subagent completes, the leader:
 
    If `PR_AUTHOR` matches the reviewer identity (e.g., the same bot or the same user), `gh pr review --approve` will fail ("Can not approve your own pull request"). In this case, skip the GitHub approval and post an informational comment instead. The inbox LGTM message should still be sent regardless.
 
-4. **Branch on result**:
+   **Side-effect bounds (oacp-cli v0.4.3+)**: before each GitHub action, consult the authorization the round runs under. On a round dispatched under a continuation grant, check the grant scope's `permitted_side_effects`; on any round, check the review_request's declared `side_effects` list. When it omits or marks `false` an action this skill would otherwise take (`submits_github_review`, `comments_on_github`), withhold that action, record it in the reply body (`withheld_side_effects: [...]`), and note the consequence for the author (e.g., a required-approval ruleset still needs a human or follow-up authorization to merge). The signed inbox LGTM/feedback message is the verdict of record and needs only the reply send. A grant is run-authorization only — every guard in this skill applies identically on granted rounds.
+
+4. **Guard the head, then branch on result**. Immediately before the terminal `oacp send` in either branch below, fetch the live head and require it to equal `REVIEWED_HEAD` by full-string comparison:
+
+   ```bash
+   LIVE_HEAD=$(gh pr view <PR_NUMBER> --json headRefOid -q .headRefOid)
+   ```
+
+   A moved head makes this round stale — send nothing terminal, retain the review_request, report the drift, and require a fresh round (recording `validated_head` does not detect or prevent this race; only the fresh lookup does). After any GitHub action (approval or comment), fetch the head **again**: a move at that point cancels terminal cleanup — retain the request, report the race, and require a fresh round rather than treating the round as delivered.
+
+5. **Branch on result**:
 
 #### If gate PASSES (result=pass) → send LGTM
 
@@ -349,10 +392,24 @@ Send inbox LGTM message:
 oacp send <PROJECT> \
   --from claude --to <AUTHOR> --type review_lgtm \
   --subject "LGTM: PR #<PR_NUMBER>" \
-  --body "quality_gate_result: pass\nmerge_ready: true\nmerge_method: squash\ntask_id: <TASK_ID>\nreview_round: <CURRENT_ROUND>" \
+  --body "quality_gate_result: pass
+merge_ready: true
+merge_method: squash
+validated_head: <REVIEWED_HEAD>
+nits:
+  - nit_id: NIT-001
+    tier: P2|P3
+    summary: <one line>
+    owner: <AUTHOR>
+    next_action: <concrete step>
+    source: <finding-id>
+task_id: <TASK_ID>
+review_round: <CURRENT_ROUND>" \
   --related-pr <PR_NUMBER> --priority P1 \
   --oacp-dir "${OACP_HOME}"
 ```
+
+`validated_head` is the full SHA taken verbatim from `rev-parse` output — never hand-expanded or truncated. Deferred non-blocking P2/P3 findings become structured `nits` entries so none dangle untracked; omit the `nits:` key entirely when there are none.
 
 Submit PR review approval using the configured GitHub token (so the approval is attributed correctly):
 
@@ -379,12 +436,17 @@ Send inbox feedback message:
 oacp send <PROJECT> \
   --from claude --to <AUTHOR> --type review_feedback \
   --subject "Review feedback: round <CURRENT_ROUND> (#<PR_NUMBER>)" \
-  --body "findings_packet: packets/findings/<packet_filename>\nround: <CURRENT_ROUND>\nblocking_count: <blocking_count>\ntask_id: <TASK_ID>\nreview_round: <CURRENT_ROUND>" \
+  --body "findings_packet: packets/findings/<packet_filename>
+round: <CURRENT_ROUND>
+blocking_count: <blocking_count>
+validated_head: <REVIEWED_HEAD>
+task_id: <TASK_ID>
+review_round: <CURRENT_ROUND>" \
   --related-pr <PR_NUMBER> --priority P1 \
   --oacp-dir "${OACP_HOME}"
 ```
 
-If `CURRENT_ROUND >= 2`, append `\nescalation: max_rounds_exceeded` to the body.
+If `CURRENT_ROUND >= 2`, append a final `escalation: max_rounds_exceeded` line to the body.
 
 Post PR comment for human visibility (status only — no paths, logs, or details):
 
@@ -418,10 +480,10 @@ command ls -1 "${INBOX_DIR}/" 2>/dev/null | command grep '\.yaml$'
 Look for files matching `*_<AUTHOR>_review_addressed.yaml`. Poll every 30 seconds for up to 10 minutes (20 polls). When found:
 
 1. Read the message with the Read tool to extract: `commit_sha`, `changes_summary`, `round`.
-2. Delete the message:
+2. Archive the message with the fail-closed `oacp_archive` helper defined in Step 2 (hash it at read time as its `ACCEPTED_SHA`; any failed guard retains the source in `inbox/`):
 
    ```bash
-   rm "${INBOX_DIR}/<filename>"
+   oacp_archive "${INBOX_DIR}" "<filename>" "$ACCEPTED_SHA"
    ```
 
 3. Fetch the updated diff:
@@ -441,7 +503,7 @@ If timeout (no message after 20 polls), print `STATUS: FEEDBACK_SENT_ROUND_<CURR
 
 After the review loop completes (LGTM sent, escalated, or timed out):
 
-- Delete all processed inbox messages (review_request, review_addressed) if not already deleted.
+- Archive (never delete) all fully-processed inbox messages for this PR (review_request, review_addressed) if not already archived — same digest-checked no-clobber move as Step 4b: recheck the live file against the SHA you captured at intake, require an absent target, `mv -n` into `inbox/archive/`, and verify the file landed; any drift, collision, or failure retains the source in `inbox/`. Messages that never reached a terminal state stay in the inbox.
 
 ## Notes
 

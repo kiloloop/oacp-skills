@@ -35,7 +35,7 @@ The skill walks through nine steps in strict order. Steps are runtime-agnostic i
    - `rule` → `recent.md` Standing Rules; promote to `rules.md` if cross-repo (3+ repos in `related:`)
    - `decision` → `recent.md` Active Decisions; promote to `decisions.md` if architectural or cross-repo
 4. **Propose a 3-file diff** — present `recent.md`, `decisions.md`, `rules.md` sections. One-line rationale per promotion. Note `recent.md` line-budget impact.
-5. **Apply edits** — preserve chronological order in `decisions.md` (new entries append at the bottom under a `## YYYY-MM-DD` heading).
+5. **Apply edits** — preserve newest-first order in `decisions.md` (new entries go at the top under a `## YYYY-MM-DD` heading).
 6. **Update the markers** — two header lines in `recent.md`:
    - `<!-- Last event folded in: <newest event filename> -->`
    - `<!-- Last curated: YYYY-MM-DD by <who> -->`
@@ -44,15 +44,15 @@ The skill walks through nine steps in strict order. Steps are runtime-agnostic i
    - **A. Cross-file consistency** — items in both `recent.md` and a curated file must agree on key facts (paths, versions, pricing, structure).
    - **B. Supersession check** — for every `Supersedes X` in `decisions.md`, verify X also points back. Asymmetric supersession reads as if both entries are active.
    - **C. Stale-status check** — entries with status claims like "Filed #N", "Pending review", "Q1 target". For GitHub issue refs, verify via `gh issue view`. Annotate inline rather than removing.
-   - **D. Chronological order in `decisions.md`** — section headers must run oldest-first, top-to-bottom. Run the mechanical check (don't self-report):
+   - **D. Chronological order in `decisions.md`** — section headers must run newest-first, top-to-bottom (new entries at the top). Run the mechanical check (don't self-report):
 
      ```bash
      command grep -nE '^## 20' $OACP_HOME/org-memory/decisions.md \
-       | awk '{print $2}' | sort -c
-     # Exit 0 = correct. Non-zero = re-sort needed.
+       | awk '{print $2}' | sort -rc
+     # Exit 0 = correct (descending). Non-zero = re-sort needed.
      ```
 
-     Re-sort with one Edit operation when `sort -c` reports disorder.
+     Re-sort with one Edit operation when `sort -rc` reports disorder.
    - **E. Category drift** — conventions filed under `decisions.md` move to `rules.md`, and vice versa.
    - **F. Migration leftovers** — content duplicated with another memory tree should be trimmed to a single pointer.
 8. **Surface findings, apply, ask** — apply uncontroversial fixes directly (annotations, chronological re-sort, strict-duplicate removal). Pause and ask on judgment calls (pricing/status conflicts where local context can't resolve the truth).
@@ -69,13 +69,13 @@ The skill walks through nine steps in strict order. Steps are runtime-agnostic i
 
 ## Optional integrations
 
-- **`oacp` CLI ≥ 0.3.0** — provides `oacp org-memory init` and event writers used elsewhere in the OACP stack.
+- **`oacp` CLI ≥ 0.4.0** — provides `oacp org-memory init` and event writers used elsewhere in the OACP stack.
 - **`gh` CLI** — needed for Step 7C stale-status verification on GitHub issue refs.
 
 ## Acceptance criteria
 
 - Marker line in `recent.md` is updated whenever events fold in. Never drop the marker.
-- Audit Step 7D uses the mechanical `sort -c` check — never self-report "chronological order looks fine".
+- Audit Step 7D uses the mechanical `sort -rc` check — never self-report "chronological order looks fine".
 - Superseded `decisions.md` entries are annotated (`**Superseded by YYYY-MM-DD <title>.**`), not deleted. History is load-bearing for understanding why a decision changed.
 - Skill-specific rules (those that affect only one skill's flow) stay in `recent.md` Standing Rules and are never promoted to `rules.md`.
 - Skill never auto-commits. The user reviews the diff and decides commit timing.

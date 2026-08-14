@@ -4,12 +4,14 @@ Check the project inbox for new agent messages and process them.
 
 ## Overview
 
-Single-pass inbox processor. Scans `$OACP_HOME/projects/$PROJECT/agents/$AGENT_NAME/inbox/` for pending messages, processes each one fully (read, act, reply, delete), then exits. Use with a loop for continuous monitoring.
+Single-pass inbox processor. Scans `$OACP_HOME/projects/$PROJECT/agents/$AGENT_NAME/inbox/` for pending messages, processes each one fully (verify, snapshot, act, reply, archive), then exits. Use a runtime heartbeat or watcher for recurring monitoring.
 
 ## Prerequisites
 
-- An [OACP](https://github.com/kiloloop/oacp) workspace initialized with `oacp init <project>`
+- [oacp-cli](https://github.com/kiloloop/oacp) `>=0.4.3` — install with the crypto extra for message signing and intake verification: `pip install 'oacp-cli[crypto]'`
+- An OACP workspace initialized with `oacp init <project>`
 - The `.oacp` project marker in the repo root (symlink or JSON file pointing to the OACP workspace)
+- Peer signing identities pinned before their first message: `oacp trust import <kid>.pub.json --project <project> --agent <agent>`
 
 ## Runtimes
 
@@ -20,12 +22,13 @@ Single-pass inbox processor. Scans `$OACP_HOME/projects/$PROJECT/agents/$AGENT_N
 
 ```bash
 # Claude Code
-mkdir -p .claude/skills/check-inbox
+mkdir -p .claude/skills/check-inbox/references
 cp skills/check-inbox/claude/SKILL.md .claude/skills/check-inbox/SKILL.md
+cp skills/check-inbox/references/autonomy.md .claude/skills/check-inbox/references/
 
 # Codex
 mkdir -p .agents/skills/check-inbox
-cp skills/check-inbox/codex/SKILL.md .agents/skills/check-inbox/SKILL.md
+cp -R skills/check-inbox/codex/. .agents/skills/check-inbox/
 ```
 
 ## Usage

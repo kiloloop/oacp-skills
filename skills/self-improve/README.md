@@ -9,8 +9,8 @@ Agents accumulate configuration drift over time: skill instructions go stale, me
 It reviews three target categories:
 
 - **Skills** — SKILL.md files that ran during the session (or a specific skill by name)
-- **Memory** — project memory files across all configured memory locations
-- **Config** — agent config files (e.g., CLAUDE.md) and settings
+- **Memory** — hand-maintained project memory; generated runtime memory remains read-only
+- **Config** — AGENTS.md or CLAUDE.md plus explicitly relevant settings
 
 Findings are tagged by severity (`[FIX]`, `[STALE]`, `[GAP]`, `[CONFLICT]`, `[BLOAT]`, `[STRUCTURAL]`) and presented for approval before any changes are applied.
 
@@ -29,12 +29,13 @@ Findings are tagged by severity (`[FIX]`, `[STALE]`, `[GAP]`, `[CONFLICT]`, `[BL
 
 ```bash
 # Claude Code
-mkdir -p .claude/skills/self-improve
+mkdir -p .claude/skills/self-improve/references
 cp skills/self-improve/claude/SKILL.md .claude/skills/self-improve/SKILL.md
+cp skills/self-improve/references/*.md .claude/skills/self-improve/references/
 
 # Codex
 mkdir -p .agents/skills/self-improve
-cp skills/self-improve/codex/SKILL.md .agents/skills/self-improve/SKILL.md
+cp -R skills/self-improve/codex/. .agents/skills/self-improve/
 ```
 
 ## Usage
@@ -50,9 +51,9 @@ cp skills/self-improve/codex/SKILL.md .agents/skills/self-improve/SKILL.md
 
 ## How it works
 
-1. **Discover** — builds an inventory of files to review based on scope
-2. **Analyze** — checks each file for staleness, contradictions, gaps, bloat, and structural issues
-3. **Report** — presents findings grouped by category with severity tags
-4. **Propose** — suggests specific edits for each finding
-5. **Apply** — makes approved changes using the Edit tool
-6. **Commit** — groups changes by repo and commits separately
+1. **Resolve** — classifies authored sources, symlinks, installed artifacts, and owners
+2. **Prove** — checks source → discovery → caller → observed behavior
+3. **Audit** — captures findings and a before/after acceptance probe
+4. **Propose** — requests approval for exact local edits and external effects
+5. **Apply** — patches only approved authored sources and reruns the probes
+6. **Publish** — commits or pushes only when separately requested

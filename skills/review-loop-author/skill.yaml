@@ -1,12 +1,13 @@
 id: review-loop-author
 name: Review Loop Author
 category: coordination
-summary: Run the author side of the review loop — address findings and drive to LGTM.
+summary: Coordinate exact-head review rounds, route verified feedback, and land or park at an authorized terminal gate.
 license: Apache-2.0
 compatible_runtimes:
   - claude-code
   - codex
-requires_oacp: ">=0.1.0"
+requires_oacp: ">=0.4.3"
 public_status: public
+public_eligibility: true
 owners:
   - kiloloop

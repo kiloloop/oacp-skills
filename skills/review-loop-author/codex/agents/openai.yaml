@@ -1,0 +1,4 @@
+interface:
+  display_name: "OACP Review Author"
+  short_description: "Coordinate OACP PR review rounds and landing"
+  default_prompt: "Use $review-loop-author to coordinate the author side of this OACP PR review."

@@ -62,6 +62,34 @@ OACP_HOME="${OACP_HOME:-$HOME/oacp}"
 INBOX_DIR="${OACP_HOME}/projects/${PROJECT}/agents/claude/inbox"
 ```
 
+Define the terminal-archival helper here, before any routing — the LGTM-first route (Step 4 → Step 10) never passes through Step 9, so a definition placed later would leave Step 10's invocation undefined in a fresh shell. Every guard fails closed (a failed check returns without moving anything, and the message stays pending in `inbox/`); the `archive/` directory is provisioned by workspace init/migration, never created during message processing:
+
+```bash
+oacp_archive() {  # oacp_archive <inbox_dir> <filename> <accepted_sha256>
+  local d="$1" f="$2" want="$3" live arch
+  [ -d "$d/archive" ] && [ ! -L "$d/archive" ] \
+    || { echo "RETAINED: archive/ missing or symlinked — provision via workspace migration"; return 1; }
+  [ -f "$d/$f" ] && [ ! -L "$d/$f" ] \
+    || { echo "RETAINED: source missing or not a regular file"; return 1; }
+  live=$(shasum -a 256 "$d/$f" | awk '{print $1}') \
+    || { echo "RETAINED: digest read failed"; return 1; }
+  [ "$live" = "$want" ] \
+    || { echo "RETAINED: digest drift — re-verify before any further processing"; return 1; }
+  [ ! -e "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] \
+    || { echo "RETAINED: destination exists — never overwrite history"; return 1; }
+  mv -n "$d/$f" "$d/archive/$f" \
+    || { echo "RETAINED: move failed"; return 1; }
+  [ ! -e "$d/$f" ] && [ ! -L "$d/$f" ] \
+    || { echo "ERROR: source path still present after move (skipped move or concurrent re-creation) — inspect before retry"; return 1; }
+  arch=$(shasum -a 256 "$d/archive/$f" 2>/dev/null | awk '{print $1}')
+  [ -f "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] && [ "$arch" = "$want" ] \
+    || { echo "ERROR: archived copy missing or digest mismatch — inspect before retry"; return 1; }
+  echo "ARCHIVED: $d/archive/$f"
+}
+```
+
+The post-move source check requires both `! -e` and `! -L` — a concurrent actor re-creating the original inbox pathname as a dangling symlink passes a bare `! -e` test, and reporting success then would leave an untrusted pathname behind a claimed-clean archival.
+
 ### 3. Check preconditions
 
 Verify all of the following. Report failures and stop:
@@ -121,21 +149,35 @@ Generate a diff summary:
 git -C <REPO_PATH> diff main...<BRANCH> --stat
 ```
 
-Write a concise 2-4 line summary. Then send the review request:
+Write a concise 2-4 line summary. Establish the review thread's explicit conversation identity — every message in this loop carries it, and continuation-grant matching (v0.4.3) binds to it. The value is validator-enforced: it must match the protocol schema `conv-<YYYYMMDD>-<agent>-<seq>` (regex `^conv-\d{8}-[A-Za-z0-9._-]{1,64}-\d{1,6}$`) — UTC date, then the originating agent, then a numeric sequence unique to this thread. The PR number is a natural sequence; if a second thread for the same PR starts on the same UTC day, pick a fresh sequence instead of reusing it:
+
+```bash
+CONV_ID="conv-$(date -u +%Y%m%d)-claude-<PR_NUMBER>"
+```
+
+Then send the review request:
 
 ```bash
 oacp send <PROJECT> \
   --from claude --to <REVIEWER> --type review_request \
   --subject "Review: PR #<PR_NUMBER>" \
+  --conversation-id "${CONV_ID}" \
   --body "pr: <PR_NUMBER>
+repo: <REPO>
 branch: <BRANCH>
+declared_head: $(git -C <REPO_PATH> rev-parse <BRANCH>)
 diff_summary: |
   <DIFF_SUMMARY>
 task_id: <TASK_ID>
+round: 1
 review_round: 1" \
   --related-pr <PR_NUMBER> --priority P1 \
   --oacp-dir "${OACP_HOME}"
 ```
+
+This round-1 message starts the review thread — record its `msg-id` as `ROUND1_REQUEST_MSG_ID`. The continuation evaluator matches same-thread evidence by **equal `conversation_id`** or by a **direct parent equal to the audited round-1 request's msg-id** — it does not traverse a chain of parents, and `--in-reply-to` cannot inherit a conversation from a message that has already been archived out of the live inbox. The explicit `--conversation-id` on every loop message is therefore the load-bearing thread identity; `--in-reply-to` is kept for logical reply threading. `repo` and the canonical `round` field are required for fail-closed grant matching; `review_round` is kept as a legacy alias.
+
+`declared_head` is advisory context for the reviewer (they bind their verdict to the live ref they fetch, not to your declaration) — take it verbatim from `rev-parse`, never hand-typed.
 
 Post a PR comment for human visibility (status only — no diff details):
 
@@ -190,11 +232,7 @@ cat "${OACP_HOME}/projects/<PROJECT>/<findings_packet>"
 
 Store the full findings YAML content as `FINDINGS_CONTENT`.
 
-Delete the `review_feedback` message from inbox:
-
-```bash
-rm "${INBOX_DIR}/<message_filename>"
-```
+**Retain the `review_feedback` message in the inbox for now** — record its filename and accepted SHA (`ACCEPTED_SHA=$(shasum -a 256 "${INBOX_DIR}/<message_filename>" | awk '{print $1}')`). It is archived only in Step 9, after both outbound messages (`review_addressed` and the round-N+1 `review_request`) have been sent successfully — a crash before that leaves it pending for clean re-dispatch. Never plain-`rm` it.
 
 If task_id is available, update task review fields:
 
@@ -339,6 +377,8 @@ After the subagent completes:
    oacp send <PROJECT> \
      --from claude --to <REVIEWER> --type review_addressed \
      --subject "Feedback addressed: round <current_round> (#<PR_NUMBER>)" \
+     --conversation-id "${CONV_ID}" \
+     --in-reply-to <FEEDBACK_MSG_ID> \
      --body "commit_sha: <LATEST_COMMIT_SHA>
    changes_summary: |
      <CHANGES_SUMMARY>
@@ -369,32 +409,45 @@ After the subagent completes:
     oacp send <PROJECT> \
       --from claude --to <REVIEWER> --type review_request \
       --subject "Re-review: PR #<PR_NUMBER> (round <current_round + 1>)" \
+      --conversation-id "${CONV_ID}" \
+      --in-reply-to <FEEDBACK_MSG_ID> \
       --body "pr: <PR_NUMBER>
+    repo: <REPO>
     branch: <BRANCH>
+    declared_head: <LATEST_COMMIT_SHA>
     diff_summary: |
       Addressed round <current_round> feedback. See review_addressed message for details.
     task_id: <TASK_ID>
+    round: <current_round + 1>
     review_round: <current_round + 1>" \
       --related-pr <PR_NUMBER> --priority P1 \
       --oacp-dir "${OACP_HOME}"
     ```
 
-11. **Increment round**: `current_round += 1`. Check if `current_round > <MAX_ROUNDS>` → Go to Step 12. If `--poll` was NOT provided → exit (single-pass mode complete). Otherwise return to Step 6 (poll for next feedback).
+    `--conversation-id "${CONV_ID}"` is what reaches the grant audit — the evaluator matches equal `conversation_id` or a direct parent equal to `ROUND1_REQUEST_MSG_ID`, never a traversed parent chain, and the archived feedback message cannot donate a conversation to `--in-reply-to`. (`--in-reply-to <FEEDBACK_MSG_ID>` remains for logical reply threading only; parenting directly to `ROUND1_REQUEST_MSG_ID` is the sanctioned alternative when no explicit conversation id was established.) `repo` and the canonical `round` field are required for fail-closed grant matching — without them a granted round falls back to per-round human confirmation.
+
+11. **Archive the processed `review_feedback`** now that both outbound messages succeeded — invoke the fail-closed `oacp_archive` helper defined in Step 2 (digest recheck against the accepted snapshot; any failed guard retains the source in `inbox/`):
+
+    ```bash
+    oacp_archive "${INBOX_DIR}" "<message_filename>" "$ACCEPTED_SHA"
+    ```
+
+12. **Increment round**: `current_round += 1`. Check if `current_round > <MAX_ROUNDS>` → Go to Step 12. If `--poll` was NOT provided → exit (single-pass mode complete). Otherwise return to Step 6 (poll for next feedback).
 
 ### 10. Handle LGTM (leader)
 
 When a `review_lgtm` message is found (from Step 4, 6, or post-round polling):
 
-1. Read the message body. Confirm `quality_gate_result: pass`.
+1. Verify the message first (oacp-cli v0.4.2+): `oacp verify "<file>" --project "${PROJECT}" --receiver <agent_name> --oacp-dir "${OACP_HOME}"` — under an enforce posture, act only on a `signed-verified` LGTM. Capture its accepted digest for the terminal archival: `ACCEPTED_SHA=$(shasum -a 256 "${INBOX_DIR}/<lgtm_message_filename>" | awk '{print $1}')`. Read the message body. Confirm `quality_gate_result: pass` and that `validated_head` equals the current PR head (full-string match against `git rev-parse`); an LGTM bound to a stale head means the reviewer approved something you have since moved — request a fresh round instead of merging on it. Structured `nits` entries in the body are deferred non-blocking items: track each one (issue, follow-up task, or documented next action) — none may dangle untracked.
 2. Parse optional `task_id` / `review_round` fields.
 3. If task_id is available, update task review fields:
    - `review_status: approved`
    - `review_round`: parsed value
    - `lgtms`: append reviewer if missing
-4. Delete the message:
+4. Archive the message with the fail-closed `oacp_archive` helper defined in Step 2 (`ACCEPTED_SHA` captured when the LGTM was read; any failed guard retains the source in `inbox/`):
 
    ```bash
-   rm "${INBOX_DIR}/<lgtm_message_filename>"
+   oacp_archive "${INBOX_DIR}" "<lgtm_message_filename>" "$ACCEPTED_SHA"
    ```
 
 5. Post PR comment:
@@ -415,7 +468,7 @@ When a `review_lgtm` message is found (from Step 4, 6, or post-round polling):
 
 ### 11. Clean up
 
-Delete any remaining processed messages from inbox that belong to this PR (matching `related_pr: <PR_NUMBER>`). Do NOT delete messages for other PRs.
+Archive (never delete) any remaining fully-processed messages for this PR (matching `related_pr: <PR_NUMBER>`) with the same digest-checked no-clobber move as Step 9. Messages still awaiting a terminal reply, and messages for other PRs, stay in the inbox.
 
 ### 12. Handle timeout or escalation
 
