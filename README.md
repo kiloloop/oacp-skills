@@ -3,7 +3,7 @@
 Reusable skills for AI coding agents coordinating over the [Open Agent Coordination Protocol](https://github.com/kiloloop/oacp).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![OACP](https://img.shields.io/badge/OACP-%3E%3D0.3.0-orange.svg)](https://github.com/kiloloop/oacp)
+[![OACP](https://img.shields.io/badge/OACP-%3E%3D0.4.2-orange.svg)](https://github.com/kiloloop/oacp)
 [![Claude Code](https://img.shields.io/badge/Runtime-Claude_Code-6B4FBB.svg)](https://claude.ai/code)
 [![Codex CLI](https://img.shields.io/badge/Runtime-Codex_CLI-74AA9C.svg)](https://github.com/openai/codex)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp-skills/pulls)
@@ -12,7 +12,7 @@ Reusable skills for AI coding agents coordinating over the [Open Agent Coordinat
 
 ### [oacp](skills/oacp/)
 
-The OACP protocol primer — teaches a runtime how to use the CLI and message protocol: version contract, workspace orientation, `oacp send` recipe with type taxonomy, `oacp inbox` vs `oacp watch`, review-loop semantics, and conventions. Auto-triggers when an agent works with OACP. Foundation for the workflow skills below.
+The OACP protocol primer — teaches a runtime how to use the CLI and message protocol: version contract, workspace orientation, `oacp send` recipe with type taxonomy, message signing and trust pinning, `oacp inbox` vs `oacp watch` (per-subscriber cursors), review-loop semantics, and conventions. Auto-triggers when an agent works with OACP. Foundation for the workflow skills below.
 
 **Runtimes:** Claude Code, Codex
 
@@ -25,7 +25,7 @@ The OACP protocol primer — teaches a runtime how to use the CLI and message pr
 
 ### [check-inbox](skills/check-inbox/)
 
-Single-pass inbox processor. Scans for pending OACP messages, processes each one (read, act, reply, delete), then exits. In Claude Code, pair with Monitor + `oacp watch` (event-driven, preferred) or fall back to `/loop` polling for continuous monitoring. In Codex, run the command once or wrap it with `/loop` for recurring checks. Honors OACP Phase 1 receiver autonomy (`always_pause` / `auto_review`) with a 4-gate evaluator, audit events, and a threshold-exceeded checkpoint.
+Single-pass inbox processor. Discovers pending OACP messages, verifies before parsing, binds handling to an immutable snapshot, replies when required, and archives only after terminal success. Use a runtime heartbeat with a stable watch cursor for recurring checks. It honors receiver autonomy and continuation grants; envelope enforcement is used only by runtimes with a verified adapter.
 
 **Runtimes:** Claude Code, Codex
 
@@ -40,35 +40,33 @@ Single-pass inbox processor. Scans for pending OACP messages, processes each one
 
 ### [review-loop-reviewer](skills/review-loop-reviewer/)
 
-Reads a PR diff, produces structured findings (blocking / non-blocking), renders a verdict (LGTM or REQUEST_CHANGES), and sends feedback to the author's OACP inbox. Supports multi-round reviews with `--poll`.
+Runs one stateless exact-head PR review round, produces structured findings, performs only declared GitHub effects, sends one terminal LGTM or feedback message, and exits. The author/coordinator owns every later round.
 
 **Runtimes:** Claude Code, Codex
 
 ```bash
 # Claude Code (triggered via check-inbox when a review_request arrives)
 /review-loop-reviewer 42 --author claude
-/review-loop-reviewer 42 --author claude --poll   # wait for author's next push
 ```
 
 ---
 
 ### [review-loop-author](skills/review-loop-author/)
 
-Picks up review findings from inbox or PR comments, applies fixes, pushes updates, and sends a `review_addressed` message back to the reviewer. Closes the review loop.
+Coordinates an exact-head review thread, routes verified feedback, applies authorized fixes, sends `review_addressed` plus a fresh bounded review request, and lands or parks only at an authorized terminal checkpoint.
 
 **Runtimes:** Claude Code, Codex
 
 ```bash
 # Claude Code (triggered via check-inbox when review_feedback arrives)
 /review-loop-author 42 --reviewer codex
-/review-loop-author 42 --reviewer codex --poll     # wait for reviewer's next round
 ```
 
 ---
 
 ### [self-improve](skills/self-improve/)
 
-Audits the agent's operating system — skills, memory files, runtime config, and AGENTS.md or CLAUDE.md instructions — for staleness, contradictions, gaps, and bloat. Proposes and applies surgical fixes with approval.
+Audits authored skills, curated project memory, runtime config, and AGENTS.md or CLAUDE.md instructions for staleness, contradictions, gaps, and bloat. It proves source-to-runtime effective state, keeps generated memory read-only, and applies surgical fixes only with approval.
 
 **Runtimes:** Claude Code, Codex
 
@@ -87,7 +85,7 @@ Audits the agent's operating system — skills, memory files, runtime config, an
 
 ### [doctor](skills/doctor/)
 
-Wraps `oacp doctor` for agent self-diagnostics. Runs checks across environment, workspace, inbox health, schemas, and agent status. Auto-fixes safe issues (missing inboxes, stale timestamps) and reports remaining blockers.
+Wraps `oacp doctor` for agent self-diagnostics. Runs checks across environment, workspace, inbox health, schemas, autonomy configs, agent status, and signing trust roots (pin completeness, enforce-readiness). Auto-fixes safe issues (missing inboxes, stale timestamps) and reports remaining blockers.
 
 **Runtimes:** Claude Code, Codex
 
@@ -105,7 +103,7 @@ oacp doctor --project myproject --fix --json # structured output
 
 ### [wrap-up](skills/wrap-up/)
 
-End-of-session cleanup in one command. 8-step sequence: cleanup stale artifacts → optional debrief → org-memory event capture → `/self-improve` → commit current repo → optional OACP memory sync → pull-rebase + push → summary. Hard dependency on `/self-improve`; optional integrations with `/debrief` and the `oacp` CLI (≥0.3.0).
+End-of-session cleanup in one command: read-only cleanup preview → verified local cleanup → debrief → significant org-memory events → delta-first `/self-improve` → bounded memory/repository publication → complete or paused summary. Hard dependency on `/self-improve`; cleanup preserves persistent, peer-owned, dirty, and post-merge-diverged work.
 
 **Runtimes:** Claude Code, Codex
 
@@ -133,13 +131,13 @@ The **oacp** skill teaches a runtime how to use the OACP CLI and protocol — it
 
 1. **check-inbox** monitors each agent's inbox for incoming messages (review requests, feedback, task assignments).
 2. When a review request arrives, the reviewer agent runs **review-loop-reviewer** to analyze the PR diff and send structured findings back.
-3. The author agent picks up the findings via **review-loop-author**, applies fixes, and sends a `review_addressed` message — closing the loop.
+3. The author agent picks up findings via **review-loop-author**, applies authorized fixes, sends `review_addressed`, and creates a fresh exact-head request for the next stateless round.
 
 The remaining skills are complementary maintenance tooling: **self-improve** audits skill instructions, memory files, and config drift; **doctor** verifies the OACP environment and workspace are healthy, especially useful at session start; and **org-memory-synthesis** keeps the cross-project SSOT layer (the one auto-loaded at session init) trustworthy by folding events and auditing for drift.
 
 ## Prerequisites
 
-- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.3.0 — install via `pip install 'oacp-cli>=0.3.0'`
+- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.4.2 — install via `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables message signing + verification; individual skills declare their own floor in `skill.yaml`)
 - A supported runtime: [Claude Code](https://claude.ai/code) or [Codex CLI](https://github.com/openai/codex)
 - An OACP workspace initialized with `oacp init <project>`
 

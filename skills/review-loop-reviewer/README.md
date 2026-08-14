@@ -4,7 +4,7 @@ Run the reviewer side of the review loop — review PR diffs, produce findings, 
 
 ## Overview
 
-Reads a PR diff, produces structured findings (blocking/non-blocking), renders a verdict (LGTM or REQUEST_CHANGES), and sends `review_feedback` or `review_lgtm` to the author's inbox. Single-pass by default; use `--poll` for in-session round 2 polling.
+Runs one stateless exact-head review round, enforces the findings contract, performs only declared GitHub effects, sends one terminal `review_feedback` or `review_lgtm`, and exits.
 
 ## Runtimes
 
@@ -20,5 +20,5 @@ cp skills/review-loop-reviewer/claude/SKILL.md .claude/skills/review-loop-review
 
 # Codex
 mkdir -p .agents/skills/review-loop-reviewer
-cp skills/review-loop-reviewer/codex/SKILL.md .agents/skills/review-loop-reviewer/SKILL.md
+cp -R skills/review-loop-reviewer/codex/. .agents/skills/review-loop-reviewer/
 ```

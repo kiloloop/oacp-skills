@@ -56,9 +56,9 @@ Invoke any time the user asks whether org-memory is current, asks to fold events
 2. **Batch-read new event bodies** — one read across all new events, skipping YAML frontmatter.
 3. **Categorize** — `type:` frontmatter routes events into `recent.md` (default) or curated files (cross-repo promotions).
 4. **Propose 3-file diff** — `recent.md`, `decisions.md`, `rules.md` sections with one-line rationale per promotion.
-5. **Apply edits** — preserve chronological order in `decisions.md` (append at the bottom).
+5. **Apply edits** — preserve newest-first chronological order in `decisions.md` (insert new dated entries at the top).
 6. **Update markers** — never drop the marker; it's the cheapest performance optimization in this flow.
-7. **Audit pass** — six checks: cross-file consistency, supersession asymmetry, stale-status (with `gh issue view`), chronological order (mechanical `sort -c` check), category drift, migration leftovers.
+7. **Audit pass** — six checks: cross-file consistency, supersession asymmetry, stale-status (with `gh issue view`), chronological order (mechanical `sort -rc` check), category drift, migration leftovers.
 8. **Surface findings, apply, ask** — uncontroversial fixes applied directly; judgment calls deferred to the user.
 9. **Suggest commit** — ready-to-paste message; user decides timing.
 
@@ -66,7 +66,7 @@ See [`shared/INTENT.md`](shared/INTENT.md) for the full contract, [`SKILL.md`](S
 
 ## Notes
 
-- Audit Step 7D **must** use the mechanical `sort -c` check on `## YYYY-MM-DD` headers — self-reported "chronological order looks fine" misses real false-cleans. This is the canonical version; ship it verbatim.
+- Audit Step 7D **must** use the mechanical `sort -rc` check on `## YYYY-MM-DD` headers so descending newest-first order is verified mechanically.
 - Superseded `decisions.md` entries are annotated (`**Superseded by …**`), never deleted. History is load-bearing.
 - Skill-specific rules stay in `recent.md` Standing Rules only — promoting them adds `rules.md` noise without cross-repo benefit.
 - Skill never auto-commits and never edits sibling memory trees.

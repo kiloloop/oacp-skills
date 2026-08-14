@@ -4,7 +4,7 @@ Run the author side of the review loop — address findings and drive to LGTM.
 
 ## Overview
 
-Picks up review findings from inbox or PR comments, applies fixes, pushes updates, and sends a `review_addressed` message back to the reviewer. Single-pass by default; use `--poll` for in-session round 2 polling.
+Coordinates an exact-head OACP review thread, routes verified findings, applies authorized fixes, requests bounded re-review rounds, and lands or parks only at an authorized terminal checkpoint.
 
 ## Runtimes
 
@@ -20,5 +20,5 @@ cp skills/review-loop-author/claude/SKILL.md .claude/skills/review-loop-author/S
 
 # Codex
 mkdir -p .agents/skills/review-loop-author
-cp skills/review-loop-author/codex/SKILL.md .agents/skills/review-loop-author/SKILL.md
+cp -R skills/review-loop-author/codex/. .agents/skills/review-loop-author/
 ```

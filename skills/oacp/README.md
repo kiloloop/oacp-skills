@@ -8,7 +8,7 @@ Teaches a runtime how to operate within the [Open Agent Coordination Protocol](h
 
 ## Prerequisites
 
-- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.3.0 — install with `pip install 'oacp-cli>=0.3.0'`
+- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.4.2 — install with `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables message signing + verification)
 - An OACP workspace initialized with `oacp init <project>`
 - A `.oacp` project marker in the repo root (created by `oacp setup <runtime> --project <project>`)
 

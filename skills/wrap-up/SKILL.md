@@ -20,29 +20,37 @@ When the user runs `/wrap-up`, execute these steps in strict order:
 
 Scope: merged branches, stale worktrees, processed inbox messages.
 
+> **Working-directory guard (run FIRST)**: verify `git rev-parse --show-toplevel` matches the session's primary repo before any cleanup command — a `cd` from earlier in the session persists in the shell, and cleanup silently runs against the wrong repo. If it doesn't match, `cd` back to the project root explicitly.
+
 #### 1a. Just-merged PR worktrees
 
 - If the session merged a PR from a dedicated worktree, remove that worktree immediately instead of waiting for the generic stale-worktree pass: `git worktree remove <path>`
 - If the current shell is still inside that worktree, do not try to remove it in place. Report the path and rerun cleanup from the main clone or another surviving worktree.
+- **Gitignored artifacts don't block removal — check for irreplaceable ones first**: `git worktree remove` succeeds when the only remaining content is gitignored (build output like `release/`, `dist/`), silently deleting it. Before removing a build worktree, check those directories for non-reproducible or pending-publish artifacts (e.g., signed installers staged for a later upload); if any exist, surface them and let the user decide. Rebuildable-by-design outputs are fine to delete — say so in the report.
 - After removing the worktree, try `git branch -d <branch>`
-- If `git branch -d <branch>` fails because the repo uses squash-only merges and the branch tip is not an ancestor of `main`, keep the branch and report it as a squash-merged local leftover instead of forcing `-D`
+- If `git branch -d <branch>` fails because the repo uses squash-only merges and the branch tip is not an ancestor of `main`, keep the branch and report it as a squash-merged local leftover instead of forcing `-D` — step 1b's PR-state pass handles it safely.
 
 #### 1b. Merged branches
 
-- List local branches merged into main:
+Squash merges leave branch tips that are never ancestors of `main`, so `git branch --merged` and `-d` are both blind to them — without a PR-state check, merged branches accumulate indefinitely while cleanup reports "nothing to clean". Run the two-pass cleanup (ancestry pass + PR-state pass), packaged as [`scripts/cleanup_branches.sh`](scripts/cleanup_branches.sh):
 
-  ```bash
-  git branch --merged main | command grep -v '^\*\|main'
-  ```
+```bash
+bash <skill-dir>/scripts/cleanup_branches.sh <repo-root>
+```
 
-- Delete each with `git branch -d <branch>` (safe delete only — never `-D`)
-- Report: "Deleted N merged branches: list" or "No merged branches to clean"
+Ensure `gh` is authenticated for the repo first (pass 2 is skipped, and nothing deleted, if `gh` can't resolve it). The script's contract:
+
+- **Pass 1 (ancestry)**: `git branch --merged main` → `git branch -d` (regular/fast-forward merges).
+- **Pass 2 (PR head)**: for each remaining local branch not checked out in any worktree, look up its merged PR and delete ONLY when the local tip exactly equals that PR's merged `headRefOid` — a `MERGED` state alone is not enough, since the branch may carry unpublished commits made after the merge, and deleting it would orphan them. The exact-head verification is the safety, not the `-D` flag. `main`, worktree-checked-out branches (including other agents'), branches with no merged PR, and branches whose tip diverged from the merged head are never deleted; they print as `KEEP` for manual review — never `-D` those by hand either.
+- **Remote counterparts**: deleting merged remote refs on a shared repo is outward-facing — list candidates and let the user authorize `git push --delete`. Assess from `git ls-remote --heads origin` after `git remote prune origin` (`git branch -a`'s remote-tracking refs go stale and inflate the list).
+- Report: "Deleted N merged branches (K ancestry + M squash); kept P unmerged" or "No merged branches to clean"
 
 #### 1c. Stale worktrees
 
 - Run `git worktree prune` to clean up missing worktrees
 - List remaining: `git worktree list`
-- For entries under `.claude/worktrees/`:
+- **Peer-agent ownership guard**: a worktree whose path or branch names another agent or runtime belongs to that agent — report it, never remove it, even when its PR is merged. Peer worktrees don't always self-identify by name: another agent's PR-review checkout may appear as a detached-HEAD worktree under a temp path with no branch name. Treat any worktree this session didn't create, in a tmp path or detached at a reviewed PR's head, as peer-owned.
+- For entries this session owns:
   - If the worktree's branch is merged into main: `git worktree remove <path>`
   - In squash-only repos, merged PR evidence also counts as stale even when branch ancestry does not show merged. Use session context or PR metadata before removing.
   - If the only signal is that the remote branch disappeared, ask before removing; the branch may be intentionally local-only.
@@ -61,7 +69,7 @@ Scope: merged branches, stale worktrees, processed inbox messages.
 - If no marker found, skip inbox cleanup
 - Inbox dir: `$OACP_HOME/projects/<project>/agents/<agent>/inbox/`
 - List YAML files with `command ls -1 <dir> | command grep '\.yaml$'` (not `*.yaml` glob — zsh `nomatch` errors when empty; `command ls` because `ls` may be aliased to `eza`; `-1` required — without it, multi-column output breaks grep)
-- If files exist: report them to the user but do NOT auto-delete (they may be unprocessed)
+- If files exist: report them to the user but do NOT auto-delete — they may be unprocessed, or held-unverified under an OACP enforce posture (oacp-cli v0.4.2+: a message that failed or lacked signature verification is surfaced explicitly, never treated as ordinary backlog)
 - If inbox is empty: report "Inbox clean"
 
 ### 2. Run debrief (optional)
@@ -150,10 +158,10 @@ oacp memory push
 - **Pull-rebase before push** to avoid conflicts with parallel runtimes that may have pushed:
 
   ```bash
-  git pull --rebase origin <branch>
+  git pull --rebase --autostash origin <branch>
   ```
 
-  If rebase fails (merge conflict), abort with `git rebase --abort`, warn the user, and skip push.
+  (`--autostash` carries uncommitted files over the rebase.) If the rebase conflicts, abort with `git rebase --abort`, warn the user, and skip push; if the autostash pop conflicts, git keeps the stash — warn and resolve before pushing.
 - Push current branch to origin: `git push origin <branch>`
 - If `--dry-run`: skip push
 - Report: branch, commit SHA, remote URL
@@ -175,7 +183,8 @@ Wrap-up complete:
 
 ## Notes
 
-- Cleanup uses only safe deletes (`git branch -d`, not `-D`). Unmerged branches are never force-deleted.
+- **Mid-wrap-up dispatches (OACP v0.4.1+ envelopes)**: if a new task auto-accepts during wrap-up, its compiled scope envelope can deny wrap-up's own later side effects (steps 4-5 commits/pushes are outside a reply-only task's envelope). Run the dispatched task's lifecycle to terminal — reply, audit update, `oacp envelope clear` — then resume wrap-up where it paused. Don't interleave the two.
+- Cleanup deletes are verification-gated: ancestry-merged, or PR confirmed `MERGED` (`git branch -d` for the former; pass 2's `-D` fires only on the PR-state verification). Unmerged branches are never force-deleted.
 - Inbox messages are reported but never auto-deleted — user must confirm deletion.
 - Debrief failure is non-fatal. The remaining steps still run.
 - Use `command grep` / `command ls` / `command find` in shell commands if your shell aliases these to other tools.

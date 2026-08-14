@@ -4,17 +4,17 @@ Run environment and workspace diagnostics, auto-fix what it can, and report bloc
 
 ## Overview
 
-Wraps `oacp doctor` for agent self-diagnostics. Runs five check categories
-(environment, workspace, inbox health, schemas, agent status), parses the
-structured JSON output, uses the native `--fix` path for safe fixes, and
-reports remaining warnings and errors with fix hints.
+Wraps `oacp doctor` for agent self-diagnostics. Parses the runtime's complete
+structured category inventory, including autonomy, trust, and optional memory
+sync checks, uses the native `--fix` path for safe fixes, and reports remaining
+warnings and errors with fix hints.
 
 Use at session start to verify the OACP environment is healthy, or on-demand
 when something seems broken.
 
 ## Prerequisites
 
-- [OACP](https://github.com/kiloloop/oacp) >= 0.1.2 — install via `pip install oacp-cli`
+- [OACP](https://github.com/kiloloop/oacp) >= 0.4.2 — install via `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables the signing/trust checks)
 - An OACP workspace initialized with `oacp init <project>` (for workspace checks)
 
 ## Runtimes
@@ -57,7 +57,10 @@ oacp doctor --project myproject --fix --json # structured output with fixes
 | Workspace | workspace.json validity, agents/ directory |
 | Inbox Health | Per-agent inbox dirs, message count and staleness |
 | Schemas | YAML validity of packets/ and status.yaml field validation |
+| Autonomy | Receiver policy parsing and policy-signature authorization |
 | Agent Status | status.yaml presence and timestamp freshness |
+| Trust | Catalog/pin drift, receiver pin completeness, enforce readiness |
+| Memory Sync | Advisory memory-repository checks when `--memory` is used |
 
 ## What it auto-fixes
 

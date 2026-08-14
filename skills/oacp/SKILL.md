@@ -1,6 +1,6 @@
 ---
 name: oacp
-description: Use the OACP (Open Agent Coordination Protocol) CLI and message protocol to coordinate multi-agent work — send messages between agents, watch inboxes, run review loops, follow OACP conventions. Trigger whenever the user mentions OACP, runs `oacp` commands, references `.oacp` workspace markers, dispatches messages between agents (notifications, task requests, review requests), or coordinates work across runtimes — even if they don't say "OACP" explicitly.
+description: Use the OACP (Open Agent Coordination Protocol) CLI and message protocol to coordinate multi-agent work — send messages between agents, sign and verify them, watch inboxes, run review loops, follow OACP conventions. Trigger whenever the user mentions OACP, runs `oacp` commands, references `.oacp` workspace markers, dispatches messages between agents (notifications, task requests, review requests), or coordinates work across runtimes — even if they don't say "OACP" explicitly.
 ---
 
 # /oacp — OACP Protocol & CLI
@@ -11,18 +11,18 @@ For runtime-agnostic protocol concepts (message schema, lifecycle, type semantic
 
 ## 1. Version check (run this first)
 
-Before any OACP operation, verify the CLI is installed and meets the version contract declared in `skill.yaml` (`requires_oacp: ">=0.3.0"`):
+Before any OACP operation, verify the CLI is installed and meets the version contract declared in `skill.yaml` (`requires_oacp: ">=0.4.2"`):
 
 ```bash
 oacp --version
 ```
 
-If the command is missing or the version is below `0.3.0`, fail loudly and ask the user to install or upgrade:
+If the command is missing or the version is below `0.4.2`, fail loudly and ask the user to install or upgrade:
 
 ```bash
-pip install --upgrade 'oacp-cli>=0.3.0'
+pip install --upgrade 'oacp-cli[crypto]>=0.4.2'   # [crypto] extra enables message signing + verification
 # or, if installed via uv:
-uv tool install --upgrade oacp-cli
+uv tool install --upgrade 'oacp-cli[crypto]'
 ```
 
 Why this matters: protocol fields and CLI flags evolve. Running this skill against an older CLI produces silent schema drift — messages may write but parse incorrectly, or `oacp watch` flags may not exist. Verify first; fix before continuing.
@@ -143,18 +143,40 @@ Two CLIs: one-shot listing vs. event-driven watching.
 **Event-driven** — `oacp watch` emits a line per new message, suitable for a Monitor process or a shell loop:
 
 ```bash
-oacp watch --all-projects --agent claude               # human-readable
-oacp watch --all-projects --agent claude --json        # JSON Lines
-oacp watch --project my-project --agent claude --since now
+oacp watch --project my-project --agent claude                       # human-readable
+oacp watch --project my-project --agent claude --json                # JSON Lines
+oacp watch --project my-project --agent claude --state-id watch-1a2b --since epoch
+oacp watch --all-projects --agent claude                             # multi-project (coordinator pattern)
 ```
 
 Flags:
 
-- `--since now` (default) suppresses replay of pre-existing inbox messages on first run.
-- `--since 5m` / `--since 2h` / `--since epoch` for replay windows.
+- `--state-id <id>` (v0.4.0+) — use a per-subscriber cursor file (`state/watch/<agent>.<state-id>.json`) so multiple concurrent watchers each receive every event independently. Omit for the legacy shared cursor. With per-subscriber cursors, **duplicate delivery across sessions is the norm** — confirm a message file still exists before processing it.
+- `--since now` (default) suppresses replay of pre-existing inbox messages on first run; `--since epoch` replays the existing backlog once on the first scan (recommended with a fresh `--state-id` so messages predating the watcher still fire); `--since 5m` / `2h` / ISO-8601 for windows. Only applies before the cursor file exists.
 - `--show-archived` emits events when messages disappear (off by default — self-loops are noisy when the watching agent is also the inbox owner).
 
 **Don't process messages here.** This skill teaches the *plumbing*. To actually act on incoming messages by type, invoke the companion `/check-inbox` skill, which has the auto-execute rules. The recommended pattern: a Monitor running `oacp watch` emits `NEW_MESSAGE` lines as chat notifications; you respond to each by running `/check-inbox`.
+
+## 4b. Message signing & trust (v0.4.2+)
+
+OACP messages carry an optional detached-JWS **auth trailer** (Ed25519). Signing is opt-in per sender; verification posture is per receiver. Requires the `[crypto]` extra.
+
+```bash
+oacp key gen --agent claude                    # generate a signing key under $OACP_HOME/keys/
+oacp key list                                  # inspect local keys
+oacp trust import <kid>.pub.json \
+  --project my-project --agent codex           # pin claude's identity for receiver codex
+oacp trust list --project my-project           # catalog entries + receiver pins
+oacp send my-project --from claude --to codex --type notification \
+  --subject "signed hello" --body "..." --sign # sign one message explicitly
+oacp verify <message.yaml> \
+  --project my-project --receiver codex        # check the trailer against codex's pins
+```
+
+- **Sender side**: `--sign` signs one message; setting the sender's `signing.sign_messages` config knob signs every send by default.
+- **Receiver side**: `signing.verify_mode` in `agents/<receiver>/config.yaml` — `warn` reports verification results without rejecting; `enforce` makes the autonomy gate reject anything not `signed-verified` at intake (evidence copy quarantined to `dead_letter/`, decision `intake_rejected`). Pin every peer **before** processing their first message — under enforce, an unpinned sender's messages cannot verify.
+- **Audit stamping**: after an autonomy decision record exists, `oacp verify <msg> ... --attach-audit <audit.yaml>` writes the canonical `result.message_auth` block into it. Never hand-write that block.
+- **Policy signing**: `oacp trust sign-policy --project <p> --agent <receiver>` signs the receiver's own policy files so the gate can detect tampering (`policy_auth` block in every decision).
 
 ## 5. Review loop — Author → Reviewer (direct)
 
@@ -167,6 +189,8 @@ The OACP review loop is **agent-to-agent direct dispatch**, not coordinator-medi
 5. Loop until `review_lgtm`. Author merges.
 
 When a 2-LGTM gate is enforced, it typically counts: author's self-review (informational, since GitHub Apps cannot formally approve their own PRs) + reviewer's `review_lgtm`.
+
+**Continuation grants (v0.4.3+)**: receivers may enable `continuation_grants` in their autonomy config so that, after one human approval of a review loop, subsequent same-thread `review_request` rounds dispatch without a per-round confirm. The grant is run-authorization only — it never confers verdict authority, and reviewer-side guards apply identically on granted rounds. See the `/check-inbox` skill's autonomy reference for the full semantics.
 
 ## 6. Health checks
 
@@ -205,7 +229,7 @@ This checks the YAML against the protocol schema and reports the first failure w
 
 ## 9. Conventions
 
-- **Delete, don't archive.** Recipients delete processed messages from `inbox/`. Do not move them to a `processed/` subdirectory — the outbox copy on the sender's side is the durable record.
+- **Archive, don't delete.** Recipients move fully-processed messages to `inbox/archive/` with a no-clobber atomic move under the original filename — byte-preserving, so signed-message evidence survives. The legacy `processed/` directory is not a protocol location, and deleting loses receiver-side evidence. Pending, held, or approval-gated messages stay in `inbox/`.
 - **Subject prefixes:** `WIP:` for in-progress updates, `Re:` for replies (auto-applied when you set `--parent-message-id`).
 - **Priorities:** `P0` (blocker, page now) → `P3` (informational). Default to `P2`. Use `P1` for actionable-this-session.
 - **Notify on merge, not on PR-open.** When working a `task_request`, the final completion `notification` goes after merge, not at PR-open. Use a `WIP:` notification for progress updates if needed.
@@ -226,4 +250,5 @@ This checks the YAML against the protocol schema and reports the first failure w
 - **`oacp send` succeeds, recipient never sees it.** The send can write the outbox copy and silently fail the inbox write. Always verify with `test -f "<inbox_path>"` against the path `oacp send` printed.
 - **Filename hash ≠ `msg-id`.** A message with id `msg-20260430-claude-39dd` may land at `..._d453.yaml`. Verify by path, not by id grep.
 - **Sandbox blocks `oacp send`.** If your runtime sandboxes filesystem writes outside the project repo, `$OACP_HOME` writes will fail. Surface the error to the user — don't paper over it.
-- **Stale CLI.** If a flag listed here doesn't exist (`oacp watch --since`, `oacp send --related-packet`), re-run the version check from Section 1 — the installed CLI may be older than the contract.
+- **Stale CLI.** If a flag listed here doesn't exist (`oacp watch --state-id`, `oacp verify --attach-audit`), re-run the version check from Section 1 — the installed CLI may be older than the contract.
+- **Message held as unverified.** Under a receiver's `enforce` posture, a message from an unpinned or badly-signed sender is quarantined to `dead_letter/` instead of processing. That is the protocol working, not a bug — import the sender's key stub (`oacp trust import`) and have them re-send, or surface to the user if the signature is genuinely invalid.

@@ -2,19 +2,22 @@
 
 ## What it does
 
-Runs `oacp doctor` to check environment health, workspace structure, inbox health, YAML schema validity, and agent status. Parses the structured output, auto-fixes what it can, and reports blockers that need human intervention.
+Runs `oacp doctor` to check environment health, workspace structure, inbox health, YAML schema validity, autonomy configs, agent status, and signing trust roots. Parses the structured output, auto-fixes what it can, and reports blockers that need human intervention.
 
 ## Check categories
 
-`oacp doctor` validates five areas:
+`oacp doctor` validates these areas (v0.4.x):
 
 | Category | What it checks |
 |----------|---------------|
 | Environment | Required tools (git, python3, gh) and optional tools (ruff, shellcheck, pyyaml) |
-| Workspace | workspace.json validity, agents/ directory presence |
+| Workspace | workspace.json validity, agents/ directory presence, per-agent profile completeness (config, status, audit scaffold — not just a bare inbox directory) |
 | Inbox Health | Per-agent inbox directories exist, message count and staleness (>24h) |
 | Schemas | YAML validity of packets/ files and status.yaml field validation (runtime, status, capabilities, updated_at) |
+| Autonomy | Receiver autonomy config blocks parse and validate; signed policy files verify (`policy_auth`) |
 | Agent Status | status.yaml presence per agent, staleness (>1h since updated_at) |
+| Trust (v0.4.1+) | Signing trust-root health: catalog-vs-pins drift, per-receiver pin-completeness gaps, enforce-readiness for `verify_mode: enforce` receivers |
+| Memory Sync (`--memory`) | Advisory checks on the OACP home memory git sync |
 
 ## Severity levels
 

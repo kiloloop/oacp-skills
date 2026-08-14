@@ -90,6 +90,8 @@ DEBRIEF="<your debrief dir>/$PROJECT/$DATE/<runtime>.md"   # adjust path to your
 [ -f "$DEBRIEF" ] && command grep -q "## Self-Improvement Report" "$DEBRIEF" && echo "PRIOR_PASS"
 ```
 
+Post-midnight sessions: a session that started before midnight debriefs under the prior day's date — when the local time is before ~5 AM, also check yesterday's debrief before concluding there was no prior pass.
+
 If a prior pass exists, narrow the full-review scope to:
 
 - **Skills**: only skills invoked since the last debrief session header
@@ -106,6 +108,8 @@ For full reviews (memory + claude-md) **without a prior same-day pass**, spawn p
 **Scale subagents by file count**: Split memory files across multiple agents (~5-7 files per agent). For a 14-file memory directory, spawn 2-3 memory subagents plus 1 CLAUDE.md subagent.
 
 Each subagent returns a structured findings report. The main agent compiles, deduplicates, and presents.
+
+Before spawning, read [references/fanout-guards.md](references/fanout-guards.md) — briefing, verification, and idle-agent guards that keep the fan-out from producing phantom findings. Every guard there exists because its failure mode occurred in a live run; follow all of them.
 
 If your runtime does not support subagent spawning, analyze files sequentially — the workflow still works, just slower.
 
@@ -133,6 +137,7 @@ For each skill SKILL.md in scope, check:
 
   over per-file sync. After fixing one, audit ALL siblings in the same parent directory — if one drifted, others likely did too.
 - **Verify quantitative claims**: When findings reference counts ("appeared N times"), durations ("X days stale"), or patterns ("recurring since"), verify against actual data (prior retros, git log, file timestamps) before including in the report. Don't estimate from memory.
+- **Citation target classification**: before flagging a citation as dead, classify it — a local file path (verify by ls/grep) vs an external published document (spec, RFC, vendor page). Absence of a local match doesn't kill an external target; verify externally or report as "unverifiable, not necessarily dead".
 
 #### 3b. Structural health gate
 
@@ -169,7 +174,7 @@ For each memory file, check:
   - **2 days**: Derived/snapshot files (e.g., execution logs, dispatch records) — computed state that drifts quickly
   - **14 days**: Authored working files (e.g., priorities, tasks, agent lists) — updated by daily ops
   - **30 days**: Stable reference files (e.g., company info, repo lists) — rarely change, that's expected
-  Flag with the file name and days since last update.
+  Flag with the file name and days since last update. If mtimes cluster suspiciously (several files sharing one timestamp) or the directory lives on a synced machine, verify via `git log -1 --format=%ad -- <file>` where the directory is git-tracked — a bulk filesystem touch resets mtimes independent of edits.
 - **Contradictions**: Cross-reference between files — e.g., priorities say X is top priority but projects show it blocked; tasks have an item that decisions say was cancelled
 - **Cross-file consistency**: Explicitly cross-reference issue numbers, agent names, and statuses across the memory index, tasks, dispatches, projects, priorities, and config files. An issue marked "Done" in one file but still listed as active in another is a `[CONFLICT]`.
 - **Session context drift**: Check conversation history for user statements like "I removed X" or "we stopped using Y" and verify memory files reflect those changes.
@@ -315,6 +320,8 @@ For each finding, propose a specific edit:
 
 For clusters of routine fixes (stale dates, obvious duplicates, baked-in lessons), group them under a single 'routine cleanup' approval item to reduce cognitive overhead.
 
+Before proposing a `[BLOAT]` deletion justified as "duplicated in X", read X and diff item-by-item — don't delete without verifying full coverage. And verify a proposed destination before naming it in the approval ask: when an option moves content to a target file, check the target's section headings first and confirm a fitting section exists.
+
 Ask: "Which changes should I apply? (all / list numbers / none)"
 
 ### 8. Apply approved changes
@@ -322,7 +329,7 @@ Ask: "Which changes should I apply? (all / list numbers / none)"
 For each approved change:
 
 1. Read the target file (if not already loaded)
-2. Make the edit using the Edit tool
+2. Make the edit using the Edit tool — before any insertion or scripted assert-replace batch, follow [references/apply-mechanics.md](references/apply-mechanics.md) (anchor-fusing and mid-batch anchor-failure modes)
 3. Confirm the change was applied
 
 ### 9. Commit changes

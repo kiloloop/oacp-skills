@@ -119,8 +119,9 @@ the change set limited to:
 - `$OACP_HOME/org-memory/decisions.md`
 - `$OACP_HOME/org-memory/rules.md`
 
-Place new `decisions.md` entries under the correct `## YYYY-MM-DD` heading so
-chronological order is preserved. Step 7D will mechanically verify order.
+Place new `decisions.md` entries at the **top** of the file under the correct
+`## YYYY-MM-DD` heading so newest-first order is preserved. Step 7D will
+mechanically verify order.
 
 ### 6. Update the markers
 
@@ -156,16 +157,27 @@ Annotate stale claims inline rather than removing them, for example:
 `Status: #15 still OPEN P3, not actioned`.
 
 **D. Chronological order in `decisions.md`.** Section headers must run
-**oldest-first, top-to-bottom**. Run the mechanical check — do not self-report:
+**newest-first, top-to-bottom** so the freshest decisions are read first. Run
+the mechanical check — do not self-report:
 
 ```bash
-command grep -nE '^## 20' $OACP_HOME/org-memory/decisions.md \
-  | awk '{print $2}' | sort -c
-# Exit 0 = order is correct. Non-zero = re-sort needed.
+DECISION_HEADERS="$(mktemp)"
+command grep -nE '^## 20' "$OACP_HOME/org-memory/decisions.md" \
+  | awk '{print $2}' >"$DECISION_HEADERS" || true
+if [ ! -s "$DECISION_HEADERS" ]; then
+  echo "No dated decision headers found" >&2
+  command rm -f -- "$DECISION_HEADERS"
+  exit 1
+fi
+ORDER_RC=0
+LC_ALL=C sort -rc "$DECISION_HEADERS" || ORDER_RC=$?
+command rm -f -- "$DECISION_HEADERS"
+test "$ORDER_RC" -eq 0
 ```
 
-If `sort -c` reports disorder, re-sort with one edit operation. The mechanical
-check is the verification; never substitute self-reporting.
+Exit zero means descending order is correct. If `sort -rc` reports disorder or
+no dated headers exist, repair with one edit operation. The mechanical check is
+the verification; never substitute self-reporting.
 
 **E. Category drift.** Conventions filed under `decisions.md` should move to
 `rules.md`, and architectural decisions filed under `rules.md` should move to
@@ -201,7 +213,7 @@ Let the user decide commit timing. The skill never commits automatically.
 - Do not auto-commit.
 - Do not edit sibling memory trees or project-scoped memory directories.
 - Do not drop the marker in `recent.md`.
-- Do not replace the Step 7D `sort -c` check with a prose claim.
+- Do not replace the Step 7D `sort -rc` check with a prose claim.
 
 ## Workarounds
 

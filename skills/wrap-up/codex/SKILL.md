@@ -1,333 +1,176 @@
 ---
 name: wrap-up
-description: End-of-session cleanup for Codex - cleanup, optional debrief, self-improve, commit, memory sync, and push in one command.
+description: "End-of-session cleanup for Codex — inspect stale artifacts, run debrief, write significant org-memory events, run a delta-first self-improve pass, then publish bounded approved memory and repository changes."
 ---
 
-# /wrap-up - Codex Session Wrap-Up
+# Wrap-up
 
-Run end-of-session hygiene in one ordered sequence: cleanup, optional debrief,
-org-memory events, self-improve, commit, OACP memory sync, pull-rebase + push,
-and a final summary.
+Close a Codex session in one ordered workflow while keeping cleanup, memory
+publication, repository publication, and external actions independently safe.
 
-## Interface
+## Invocation
 
-```bash
-/wrap-up
-/wrap-up --dry-run
-```
+- `$wrap-up` runs the full sequence and authorizes the bounded local cleanup
+  and publication described below.
+- `$wrap-up --dry-run` performs only read-only cleanup inspection,
+  `$debrief --dry-run`, event planning, and a read-only self-improve audit. It
+  makes no file edits, cleanup mutations, event writes, commits, or pushes.
+- An explicit `no-push` or `local-only` request runs the local sequence but
+  performs no memory or repository commits or pushes.
 
-- `/wrap-up`: run the full sequence.
-- `/wrap-up --dry-run`: run Steps 1-4, then report what Steps 5-7 would do
-  without committing, memory-syncing, or pushing.
+Read the nearest `AGENTS.md` first. It owns repository identity, persistent
+branch/worktree policy, validation, authentication, and publication rules.
 
-## Workflow
+## 1. Capture a read-only snapshot
 
-When the user runs `/wrap-up`, execute these steps in order.
-
-### 1. Cleanup stale artifacts
-
-Scope: just-merged PR worktrees, merged local branches, stale worktrees, and
-pending inbox messages. Use safe cleanup only; never force-delete a branch.
-
-Start with repo and base-branch context:
+Confirm the operational root and capture status before changing anything:
 
 ```bash
 REPO_ROOT="$(git rev-parse --show-toplevel)"
-BASE_BRANCH="$(git symbolic-ref --quiet --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')"
-BASE_BRANCH="${BASE_BRANCH:-main}"
-BASE_REF="$BASE_BRANCH"
-git show-ref --verify --quiet "refs/heads/$BASE_BRANCH" || BASE_REF="origin/$BASE_BRANCH"
 CURRENT_BRANCH="$(git -C "$REPO_ROOT" branch --show-current)"
+git -C "$REPO_ROOT" status --short
+git -C "$REPO_ROOT" worktree list --porcelain
+git -C "$REPO_ROOT" worktree prune --dry-run --verbose
 ```
 
-#### 1a. Just-merged PR worktrees
-
-If this session merged a PR from a dedicated worktree under
-`<repo-root>/.worktrees/`, remove that worktree immediately from a surviving
-checkout:
+Resolve the base branch and every persistent branch/worktree from
+`AGENTS.md`. Establish the repository-authorized GitHub identity when the
+squash-merge pass is needed, then preview branch cleanup:
 
 ```bash
-git worktree remove <path>
-git branch -d <branch>
+bash "$SKILL_DIR/scripts/cleanup_branches.sh" "$REPO_ROOT" --dry-run \
+  --base "$BASE_BRANCH" [--keep <persistent-branch>]...
 ```
 
-- Do not remove the worktree if the current shell is inside it. Report the path
-  and rerun cleanup from the main clone or another worktree.
-- If `git branch -d` fails after a squash merge, keep the branch and report it
-  as a squash-merged local leftover. Do not use `git branch -D`.
+Use `oacp inbox --json` for the current Codex project. Distinguish ordinary
+pending messages from held-unverified enforce-mode rows. Never parse held
+fields, and never treat either class as processed cleanup.
 
-#### 1b. Merged branches
+Read [references/cleanup.md](references/cleanup.md) only when a candidate
+exists or a snapshot command fails.
 
-List local branches merged into the base branch:
+## 2. Clean stale artifacts
+
+Skip all mutations in dry-run mode. In a full run, the invocation authorizes
+only the local candidates that satisfy every guard below.
+
+Run the packaged two-pass branch helper after passing all persistent branches
+as `--keep`. Its ancestry pass uses safe `git branch -d`; its squash pass
+uses `-D` only when the local tip exactly equals a merged PR's
+`headRefOid`. A `MERGED` state alone, a missing remote branch, or a
+post-merge local tip never authorizes deletion.
+
+For worktrees:
+
+- never remove the current, persistent, peer-owned, dirty, or untracked
+  worktree;
+- before removal, inspect ignored content and retain irreplaceable signed,
+  staged-for-publication, or otherwise non-reproducible artifacts;
+- remove only a clean session-owned worktree whose branch is already proved
+  merged;
+- begin administrative pruning with `git worktree prune --dry-run --verbose`;
+  in full mode, rerun immediately and mutate only when the exact candidate set
+  is unchanged and every entry was resolved as stale;
+- keep detached or runtime-managed worktrees this session did not create.
+
+Remote branch deletion is a separate outward-facing approval. Inbox lifecycle
+is not wrap-up cleanup: report queued paths and leave them for
+`$check-inbox` to verify, process, reply, and archive terminally.
+
+## 3. Run debrief
+
+Invoke `$debrief` using project auto-detection. This attempt is required, but
+failure is non-fatal: report it and continue. Do not fabricate a debrief when
+the skill fails. In dry-run mode invoke `$debrief --dry-run`.
+
+## 4. Write significant org-memory events
+
+Use a successful debrief as source material. Skip when debrief failed,
+org-memory is not initialized, or the session produced no cross-project
+outcome.
+
+Deduplicate against tracked and untracked events. Write at most 3–5 entries and
+write zero for routine fixes, tests, documentation cleanup, inbox processing,
+self-improve findings, or read-only work. Read
+[references/publication.md](references/publication.md) only when an
+event is plausibly eligible. In dry-run mode, report proposed events without
+writing them.
+
+## 5. Run delta-first self-improve
+
+Invoke `$self-improve` in session-delta mode. Start with:
+
+- skills actually used this session;
+- guidance, curated memory, or config changed this session;
+- observed failures, workarounds, conflicts, stale claims, or discovery gaps.
+
+Expand only when evidence indicates drift. Route release-wide migrations,
+multi-skill capability changes, and context-budget audits to
+`$audit-oacp-skills`.
+
+Dry-run keeps this audit read-only. If changes are proposed, pause and relay
+the complete approval menu: recommendation, numbered items, target files and
+repos, exact outcomes, and allowed replies. Apply only approved edits. After
+the user resolves the menu, continue without a second publication question
+unless the user narrowed or disabled publication.
+
+A pause must report all state gathered so far and every deferred cleanup,
+event, memory, commit, and push action. Use
+`Wrap-up paused — self-improve approval required`, never the completion
+report.
+
+## 6. Publish memory and repository changes
+
+A full wrap-up publishes OACP memory once and commits/pushes only bounded
+approved repository changes. Skip publication for dry-run, `no-push`,
+`local-only`, narrower scope, or unavailable required authentication.
+
+`oacp memory push` is the sole memory publication path. Never substitute
+manual memory-repository staging, commits, repair, or force push. Handle each
+source repository independently and stage explicit paths only. Exclude
+unrelated or pre-existing changes, credentials, private keys, `.env`, local
+settings, generated caches, and live runtime state.
+
+Before a repository push, follow its nearest `AGENTS.md`, inspect token-free
+remotes, and synchronize with:
 
 ```bash
-MERGED_BRANCHES="$(git branch --merged "$BASE_REF" | command grep -v '^\*\|^[[:space:]]*'"$BASE_BRANCH"'$' || true)"
-printf '%s\n' "$MERGED_BRANCHES"
+git pull --rebase --autostash origin "$CURRENT_BRANCH"
 ```
 
-`command grep` exits with status `1` when there are no matches. Treat an empty
-`MERGED_BRANCHES` value as `No merged branches to clean`, not as a cleanup
-failure.
+If rebase or autostash restoration conflicts, abort/stop, preserve the work,
+and report that repository as unpublished. Read
+[references/publication.md](references/publication.md) only when publication is
+actionable.
 
-Delete each listed branch with safe delete only:
-
-```bash
-git branch -d <branch>
-```
-
-Report either `Deleted N merged branches: ...` or
-`No merged branches to clean`.
-
-#### 1c. Stale worktrees
-
-Prune missing worktree admin entries, then inspect repo-local worktrees:
-
-```bash
-git worktree prune
-git worktree list --porcelain
-```
-
-For worktrees under `<repo-root>/.worktrees/`:
-
-- If the worktree is the current checkout, keep it and report that cleanup must
-  run elsewhere.
-- If its branch is merged into `$BASE_REF` and the worktree is clean, remove it
-  with `git worktree remove <path>`, then try `git branch -d <branch>`.
-- If it has modified or untracked files, keep it and report it as dirty.
-- If it is not merged, keep it and report it as still active.
-- If the only stale signal is a missing remote branch, ask before removal.
-
-Use this cleanup decision matrix:
-
-| Worktree state | Action |
-| --- | --- |
-| Current shell is inside the worktree | Keep it; report that cleanup must run from another checkout. |
-| Repo-local `.worktrees/<name>` and branch is merged into base | Remove with `git worktree remove <path>`, then safe-delete the branch with `git branch -d <branch>`. |
-| Repo-local `.worktrees/<name>` and only the remote branch is missing | Ask before removal. |
-| Any candidate worktree is dirty or has untracked files | Keep it and report the dirty worktree. |
-| Detached runtime-managed worktree outside the repo root | Report separately unless this session created it and proved it is no longer needed. |
-
-Report either `Pruned N worktrees` or `No stale worktrees`.
-
-#### 1d. Inbox status
-
-Resolve the project from OACP markers:
-
-```bash
-PROJECT="$(python3 - <<'PY'
-import json
-import os
-
-def project_from_marker(path: str) -> str:
-    if not (os.path.isfile(path) or os.path.islink(path)):
-        return ""
-    try:
-        resolved = os.path.realpath(path) if os.path.islink(path) else path
-        with open(resolved, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("project_name", "") or ""
-    except Exception:
-        return ""
-
-for marker in (".oacp", "workspace.json"):
-    project = project_from_marker(marker)
-    if project:
-        print(project)
-        break
-else:
-    print("")
-PY
-)"
-```
-
-If the project is empty, report `Inbox skipped (no OACP project marker)`.
-Otherwise, use the OACP CLI snapshot as the source of truth:
-
-```bash
-OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
-INBOX_JSON_FILE="$(mktemp)"
-trap 'rm -f "$INBOX_JSON_FILE"' EXIT
-oacp inbox "$PROJECT" --agent codex --oacp-dir "$OACP_ROOT" --json >"$INBOX_JSON_FILE"
-python3 - "$INBOX_JSON_FILE" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as f:
-    report = json.load(f)
-for agent in report.get("agents", []):
-    for message in agent.get("messages", []):
-        path = str(message.get("path", "")).strip()
-        if path.endswith(".yaml"):
-            print(path)
-PY
-```
-
-- If `oacp` is unavailable or the project is absent from `$OACP_ROOT`, warn and
-  continue.
-- If files exist, report them to the user. Do not auto-delete inbox messages.
-- If none exist, report `Inbox clean`.
-
-### 2. Debrief
-
-Debrief is non-fatal. Use the first available target:
-
-1. If a `/debrief` skill is installed, run it and let it write to its
-   configured location.
-2. Else if `$CORTEX_HOME` points at a clone of `kiloloop/cortex`, write the
-   debrief there following that repo's inbox layout.
-3. Else write a concise session summary to `./.oacp/debriefs/YYYY-MM-DD.md`
-   inside the current repo, creating the directory if needed.
-
-If a configured debrief target fails, warn and continue to Step 3.
-
-### 3. Org-memory events
-
-Write org-memory events only for outcomes that matter to other agents or
-projects. Skip routine completions, inbox messages processed, minor doc edits,
-and self-improve findings.
-
-```bash
-OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
-test -d "$OACP_ROOT/org-memory/events" || { echo "Skipped (org-memory not initialized)"; exit 0; }
-```
-
-Use `oacp write-event` with the Codex agent name:
-
-```bash
-oacp write-event --agent codex --project <project> \
-  --type <decision|event|rule> --slug <short-slug> \
-  --body "<one-line description>" \
-  [--related "PR #N,..."] \
-  [--oacp-dir "$OACP_ROOT"]
-```
-
-Guidance:
-
-- Write at most 3-5 events.
-- Use lowercase alphanumeric slugs with hyphens only.
-- Convert version dots in slugs to hyphens, such as `cli-0-3-0-released`.
-- Report `Wrote N org-memory events`, `Skipped (org-memory not initialized)`,
-  or `No org-memory events (routine session)`.
-
-### 4. Run /self-improve
-
-`/self-improve` is a hard dependency.
-
-- Invoke `/self-improve` with full scope: skills, memory, and config.
-- If the skill is not installed, stop with this install hint:
-
-  ```bash
-  mkdir -p .agents/skills/self-improve
-  cp skills/self-improve/codex/SKILL.md .agents/skills/self-improve/SKILL.md
-  ```
-
-- Pause when `/self-improve` asks which changes to apply.
-- When pausing, relay the full `/self-improve` decision menu: recommended
-  choice if any, numbered changes, target files/repos, exact outcomes, and
-  allowed replies such as `all`, `none`, or specific numbers.
-- Apply only approved changes.
-- If `/self-improve` proposes edits outside the current repo, report that
-  clearly. Other repositories remain opt-in for commit and push scope.
-- If no findings are reported, continue.
-
-Optional follow-up: if Step 4 produced findings or the user corrected the
-process, run `/self-improve self-improve` and apply only approved changes.
-
-### 5. Commit current repo
-
-Skip this step in `--dry-run`.
-
-Check the current repo:
-
-```bash
-git status --short
-```
-
-If there are no changes, report `Commit: no changes` and continue.
-
-Rules:
-
-- Commit only the current repo. Other repos are out of scope unless the user
-  explicitly opts in.
-- Do not commit unrelated pre-existing user work. If the tree is already dirty
-  with unrelated changes, report the skipped paths and leave them unstaged.
-- Stage files explicitly; do not use `git add -A` or `git add .`.
-- Exclude `.env`, credentials, private keys, `settings.json`, and
-  `settings.local.json` unless the user explicitly asks.
-- Exclude ephemeral runtime artifacts such as live lockfiles and local
-  permission files.
-- If a lockfile contains a PID and that process is still active, treat it as
-  live runtime state and exclude it from commit decisions. If the PID is missing
-  or no longer active, report it as stale instead of silently staging it.
-- Commit message: `wrap-up: <brief summary>`.
-
-### 6. OACP memory sync
-
-Skip this step in `--dry-run`.
-
-Sync memory through the OACP CLI instead of manual git commands:
-
-```bash
-OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
-test -f "$OACP_ROOT/.oacp-memory-repo" || { echo "memory: skipped (sync not active)"; exit 0; }
-oacp memory push --oacp-dir "$OACP_ROOT"
-```
-
-Rules:
-
-- Memory sync is independent of the current-repo commit and push.
-- If `oacp memory push` fails, report the failure and continue to Step 7.
-- Do not force-push or manually edit memory repo git state.
-- SSH signing or agent socket access requirements must be described in prose
-  and handled by the active runtime configuration, not by inline bypass flags.
-
-Report the memory result: pushed commit SHA, clean/no changes, skipped, or
-failed.
-
-### 7. Pull-rebase and push current repo
-
-Skip this step in `--dry-run`.
-
-Before pushing:
-
-- Inspect `git remote -v`. If a remote contains an embedded credential, reset it
-  to a plain GitHub URL before continuing.
-- Follow the active repo's `AGENTS.md` for authentication requirements.
-- Pull with rebase before pushing the current branch:
-
-  ```bash
-  BRANCH="$(git branch --show-current)"
-  git pull --rebase origin "$BRANCH"
-  git push origin "$BRANCH"
-  ```
-
-- If the branch is detached, report that push is skipped.
-- If rebase conflicts, run `git rebase --abort`, report the conflict, and skip
-  push.
-
-Report branch, commit SHA, and remote URL with any credential redacted.
-
-### 8. Summary
-
-Print a final status block:
+## 7. Summarize
 
 ```text
 Wrap-up complete:
-- Cleanup: N branches, M worktrees pruned, inbox <status>
-- Debrief: <mode> - <path or "skipped">
-- Org-memory: N events written (or "skipped" or "routine session")
+- Cleanup: N branches, M worktrees, inbox <clean / pending / held>
+- Debrief: <saved path or failure>
+- Org-memory events: N written / planned / skipped
 - Self-improve: N findings (M applied)
-- Commit: <sha> on <branch> (or "no changes" / "skipped")
-- OACP memory: <sha> (or "clean" / "skipped" / "failed")
-- Push: <branch> -> origin (or "skipped")
+- Memory: <pushed SHA / no changes / skipped / failed>
+- Commits: <repo>@<sha> on <branch>; ... (or "no changes")
+- Pushes: <repo>: <branch> -> origin; ... (or "skipped")
+- Deferred: <remaining dirty, held, or approval-gated work>
 ```
 
-## Guardrails
+A successful debrief or edit does not imply that its repository was committed
+or pushed.
 
-- Use safe branch deletion only: `git branch -d`, never `-D`.
-- Never auto-delete inbox messages.
-- Debrief and memory-sync failures are non-fatal.
-- Keep commits scoped to the current repo unless the user explicitly expands
-  scope.
-- Do not inline runtime-specific sandbox bypass flags.
-- Preserve unrelated user changes.
+## Durable rules
+
+- Keep OACP memory, the current repository, and every sibling repository as
+  separate Git scopes.
+- Default publication is bounded to OACP memory, the current repository, and
+  another repository only when this wrap-up created or explicitly approved
+  changes there. Other repositories require opt-in.
+- PR creation, merge, release/promotion, deployment, remote-branch deletion,
+  and unrelated existing changes always require separate authority.
+- Preserve unrelated user and concurrent-runtime work.
+- Codex does not compile, extend, or clear the Claude-only OACP enforcement
+  envelope.
+- Consolidate repeatable lessons into their owning guidance; do not append a
+  second procedure or learned log.
