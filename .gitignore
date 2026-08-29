@@ -12,5 +12,7 @@ venv/
 .DS_Store
 .agent-hub
 .oacp
+.worktrees/
 AGENTS.md
 CLAUDE.md
+.claude/

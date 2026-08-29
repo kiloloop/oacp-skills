@@ -1,0 +1,12 @@
+id: debrief
+name: Debrief
+category: ops
+summary: Capture a structured session summary and publish it to the OACP org-memory debrief store as one immutable, hash-verified record.
+license: Apache-2.0
+compatible_runtimes:
+  - claude-code
+  - codex
+requires_oacp: ">=0.4.4"
+public_status: public
+owners:
+  - kiloloop

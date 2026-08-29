@@ -8,6 +8,6 @@ compatible_runtimes:
   - codex
 requires_oacp: ">=0.4.2"
 public_eligibility: true
-public_status: staging
+public_status: public
 owners:
   - kiloloop

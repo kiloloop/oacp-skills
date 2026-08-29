@@ -115,6 +115,19 @@ End-of-session cleanup in one command: read-only cleanup preview → verified lo
 
 ---
 
+### [debrief](skills/debrief/)
+
+Publish a structured session summary to the org-memory debrief store at `$OACP_HOME/org-memory/debriefs/<project>/<YYYY>/<MM>/`. One session produces one immutable, hash-verified record: the writer stages privately, publishes with an atomic no-replace link, and reads back to confirm, so the canonical path never holds a partial record. Append-only — identical content republishes idempotently, differing content at the same path fails rather than overwriting. Feeds `/wrap-up`'s debrief step.
+
+**Runtimes:** Claude Code, Codex
+
+```bash
+/debrief            # generate the summary and publish it
+/debrief --dry-run  # generate and display it; write nothing
+```
+
+---
+
 ### [org-memory-synthesis](skills/org-memory-synthesis/)
 
 Synthesize the cross-project org-memory layer that the OACP session-init hook auto-loads. Folds new events from `$OACP_HOME/org-memory/events/` into the three curated SSOT files (`recent.md`, `decisions.md`, `rules.md`) via a marker-based incremental scan, then runs a 6-check audit (cross-file consistency, supersession asymmetry, stale-status, mechanical chronological order, category drift, migration leftovers). Pairs naturally with `/wrap-up`'s org-memory step.

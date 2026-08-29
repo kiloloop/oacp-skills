@@ -34,6 +34,10 @@ jobs:
           REQUIRED_FIELDS = ["id", "name", "category", "summary", "license",
                              "compatible_runtimes", "requires_oacp", "public_status", "owners"]
 
+          # Presence alone let an unsupported value ship; the vocabulary is
+          # documented in CONTRIBUTING.md and is what promotion reads.
+          PUBLIC_STATUS_VALUES = {"staging", "public", "internal-only"}
+
           errors = []
           for path in sorted(glob.glob("skills/*/skill.yaml")):
               with open(path) as f:
@@ -48,6 +52,12 @@ jobs:
                   for field in REQUIRED_FIELDS:
                       if field not in data:
                           errors.append(f"{path}: missing required field '{field}'")
+                  status = data.get("public_status")
+                  if status is not None and status not in PUBLIC_STATUS_VALUES:
+                      allowed = " | ".join(sorted(PUBLIC_STATUS_VALUES))
+                      errors.append(
+                          f"{path}: public_status '{status}' is not one of: {allowed}"
+                      )
 
           if errors:
               for e in errors:
