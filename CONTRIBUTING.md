@@ -66,3 +66,26 @@ Before submitting a skill for public promotion:
 3. Validate: CI runs YAML frontmatter lint + markdownlint automatically on PR
 4. Open a PR — one skill per PR for review clarity
 5. Reviewer checks scrub checklist above
+
+## Versioning
+
+This collection follows [Semantic Versioning](https://semver.org/), with one
+deliberate narrowing of the usual "new feature → MINOR" reading:
+
+| Bump | When |
+|------|------|
+| **PATCH** (`0.7.0` → `0.7.1`) | Any non-breaking change — fixes, doc corrections, skill updates, **and new skills entering the catalog**. This is the default; most releases are patches. |
+| **MINOR** (`0.7.0` → `0.8.0`) | A breaking interface or schema change (e.g. a `skill.yaml` field removed or repurposed), or a raise to the collection's `requires_oacp` ceiling. |
+| **MAJOR** (`1.0.0`) | First stable release; thereafter, incompatible changes to the skill packaging contract. |
+
+Adding a skill is an addition, not a new interface — the catalog grows without
+changing anything an existing consumer depends on, so it is a PATCH.
+
+**Recorded deviation:** v0.7.0 was cut as a MINOR bump for a skill addition
+(`debrief`). It stands as released — no re-cut — and is the one exception on the
+books. The next skill-adding release is v0.7.1.
+
+The OACP badge in `README.md` is a **ceiling**: it reads `max(requires_oacp)`
+across `skills/*/skill.yaml` and is refreshed at each cut, so installing it
+satisfies every skill. Individual skills declare their own floor in `skill.yaml`
+and many run on less.
