@@ -3,7 +3,7 @@
 Reusable skills for AI coding agents coordinating over the [Open Agent Coordination Protocol](https://github.com/kiloloop/oacp).
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![OACP](https://img.shields.io/badge/OACP-%3E%3D0.4.2-orange.svg)](https://github.com/kiloloop/oacp)
+[![OACP](https://img.shields.io/badge/OACP-%3E%3D0.4.4-orange.svg)](https://github.com/kiloloop/oacp)
 [![Claude Code](https://img.shields.io/badge/Runtime-Claude_Code-6B4FBB.svg)](https://claude.ai/code)
 [![Codex CLI](https://img.shields.io/badge/Runtime-Codex_CLI-74AA9C.svg)](https://github.com/openai/codex)
 [![PRs Welcome](https://img.shields.io/badge/PRs-Welcome-brightgreen)](https://github.com/kiloloop/oacp-skills/pulls)
@@ -146,11 +146,13 @@ The **oacp** skill teaches a runtime how to use the OACP CLI and protocol — it
 2. When a review request arrives, the reviewer agent runs **review-loop-reviewer** to analyze the PR diff and send structured findings back.
 3. The author agent picks up findings via **review-loop-author**, applies authorized fixes, sends `review_addressed`, and creates a fresh exact-head request for the next stateless round.
 
+Two more bracket the session itself: **debrief** publishes a structured summary of a finished session to the org-memory debrief store as one immutable, hash-verified record, and **wrap-up** drives the whole end-of-session sequence — cleanup, debrief, org-memory events, `self-improve`, publication — in a single command.
+
 The remaining skills are complementary maintenance tooling: **self-improve** audits skill instructions, memory files, and config drift; **doctor** verifies the OACP environment and workspace are healthy, especially useful at session start; and **org-memory-synthesis** keeps the cross-project SSOT layer (the one auto-loaded at session init) trustworthy by folding events and auditing for drift.
 
 ## Prerequisites
 
-- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.4.2 — install via `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables message signing + verification; individual skills declare their own floor in `skill.yaml`)
+- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.4.4 — install via `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables message signing + verification). This is the ceiling across the catalog, so it satisfies every skill; individual skills declare their own floor in `skill.yaml` and many run on less.
 - A supported runtime: [Claude Code](https://claude.ai/code) or [Codex CLI](https://github.com/openai/codex)
 - An OACP workspace initialized with `oacp init <project>`
 
@@ -200,7 +202,8 @@ ln -s ~/oacp-skills/skills/check-inbox/SKILL.md \
       .claude/skills/check-inbox/SKILL.md
 
 # Symlink all skills at once
-for skill in check-inbox doctor oacp review-loop-author review-loop-reviewer self-improve; do
+for dir in ~/oacp-skills/skills/*/; do
+  skill=$(basename "$dir")
   mkdir -p .claude/skills/$skill
   ln -sf ~/oacp-skills/skills/$skill/SKILL.md \
          .claude/skills/$skill/SKILL.md
