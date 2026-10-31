@@ -17,16 +17,20 @@ tracked and untracked event files before writing. An equivalent local event
 already counts.
 
 Use lowercase alphanumeric-and-hyphen slugs of 1–64 characters, beginning and
-ending with an alphanumeric character. Convert dots to hyphens.
+ending with an alphanumeric character. Convert dots to hyphens. Require
+`agent-memory` on PATH; if unavailable, report the missing `agent-memory-cli`
+prerequisite and skip event writing.
 
 ```bash
-oacp write-event --agent codex --project "$PROJECT" \
+agent-memory event write --agent codex --project "$PROJECT" \
   --type <decision|event|rule> --slug <short-slug> \
-  --body "<one-line description>" --oacp-dir "$OACP_ROOT"
+  --body "<one-line description>" --home "$OACP_ROOT" \
+  --source-ref "<debrief-filename-stem>"
 ```
 
-Use `--source-ref`, `--related`, or `--body-file` when they materially
-improve traceability. Keep a session batch to 3–5 events and report written,
+Every debrief-derived event carries its exact filename stem in `--source-ref`.
+Use `--related` or `--body-file` when they improve traceability. Keep a session
+batch to 3–5 events and report written,
 deduplicated, skipped, or routine status.
 
 ## Publication
@@ -40,11 +44,16 @@ remote policy.
 Resolve `OACP_ROOT` from `OACP_HOME` or the active environment. If its
 `.oacp-memory-repo` marker is absent, report sync disabled. Run exactly one
 publication command after debrief, event writing, and approved self-improve
-edits:
+edits. Require `agent-memory` on PATH; if unavailable, report the missing
+`agent-memory-cli` prerequisite and skip memory publication. Do not run
+runtime setup to satisfy this prerequisite.
 
 ```bash
-oacp memory push --oacp-dir "$OACP_ROOT"
+agent-memory push --home "$OACP_ROOT" --agent codex
 ```
+
+Pass `--agent codex` explicitly so agent-authored commits do not fall back to
+the human login. Skip when the session project opted out.
 
 Skip for dry-run, `no-push`, `local-only`, narrower scope, or unavailable
 required authentication. Record memory HEAD before and after. Never replace

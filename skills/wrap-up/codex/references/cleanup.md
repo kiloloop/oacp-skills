@@ -9,25 +9,22 @@ Resolve the base branch from `origin/HEAD`, falling back to `main`, and
 collect persistent branches from repository guidance. Establish the authorized
 GitHub identity before querying PR state.
 
-Use the packaged helper for both preview and execution:
+Preview ancestry candidates using `git branch --format='%(refname:short)'
+--merged "$BASE_BRANCH"`. Exclude base, persistent, peer-owned, and checked-out
+branches; use `git branch -d` for verified ancestry-merged candidates.
 
-```bash
-bash "$SKILL_DIR/scripts/cleanup_branches.sh" "$REPO_ROOT" --dry-run \
-  --base "$BASE_BRANCH" [--keep <persistent-branch>]...
-bash "$SKILL_DIR/scripts/cleanup_branches.sh" "$REPO_ROOT" \
-  --base "$BASE_BRANCH" [--keep <persistent-branch>]...
-```
-
-The full second command is allowed only outside dry-run. The helper:
-
-- safe-deletes ancestry-merged branches with `git branch -d`;
-- skips base, persistent, and worktree-checked-out branches;
-- queries merged PRs for remaining local branches;
-- force-deletes a squash-merged local branch only when its current tip exactly
-  equals the merged PR's `headRefOid`;
-- keeps branches with no merged PR, a mismatched tip, or unavailable authorized
-  GitHub state;
-- never deletes remote branches.
+For remaining branches, query the repository-authorized GitHub identity for
+merged PR `state` and `headRefOid`, then compare the exact local tip. A full
+wrap-up authorizes `git branch -D` only for a recorded session-created branch
+with state `MERGED` and an equal head. Pre-existing branches need separate
+force-cleanup approval. The helper requires explicit recorded ownership and
+checks `headRepository.nameWithOwner`, cross-repository status, branch, merged
+state and exact head equality. Its JSON includes the PR head, local tip and
+real checked-out path. Missing ownership, failed `git status`, failed PR reads,
+fork/name collisions and divergent tips never recommend deletion. Always
+read back the exact PR identity/head and local tip immediately before deletion. Keep missing PR
+state, a mismatched tip, and unknown ownership. Never delete remote branches
+without separate outward authority.
 
 Exact head identity is mandatory because a `MERGED` branch can contain
 unpublished commits made after the merge.
@@ -78,3 +75,12 @@ wrap-up; terminal lifecycle belongs to `$check-inbox`.
 
 Report candidates kept because they were current, persistent, peer-owned,
 dirty, unverified, drifted, or awaiting approval.
+
+## Live, local, and cached refs
+
+Check live GitHub, local `refs/heads/<branch>`, and cached
+`refs/remotes/origin/<branch>` separately. A deleted server branch does not
+delete a local branch; a cached ref does not prove the server ref exists.
+After verifying an exact live ref is absent, remove only that stale cached
+ref with `git update-ref -d` when cleanup scope permits. Do not issue a
+redundant server deletion or treat remote disappearance as merge evidence.

@@ -74,6 +74,13 @@ files.
   defined homes; flag duplication and contradictions.
 - Treat age as a review signal, not proof of staleness.
 - Apply line or context budgets only to hand-maintained memory.
+- Before curating a file, identify machine-readable comments, cursors, and
+  anchors used by its readers. Preserve their exact syntax and values unless
+  the approved work explicitly advances them; prose is not a replacement.
+- For OACP `org-memory/recent.md`, preserve the exact
+  `<!-- Last event folded in: <filename> -->` line and check the current local
+  character budget in `org-memory/rules.md`. Measure before and after; report
+  an existing overrun and its owner rather than treating it as within budget.
 - Flag OACP split-brain when markers, guidance, skills, and runtime memory
   disagree about `$OACP_HOME` or project identity.
 

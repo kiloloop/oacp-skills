@@ -17,6 +17,11 @@ FULL_SHA = re.compile(r"^[0-9a-fA-F]{40}$")
 SEVERITIES = {"P0", "P1", "P2", "P3"}
 RESOLVED = {"fixed", "wont_fix"}
 ESCALATIONS = {"reviewer_budget_exceeded", "max_rounds_exceeded"}
+SIDE_EFFECTS = {
+    "creates_or_updates_pr", "comments_on_github", "commits_changes",
+    "merges_pr", "files_issues", "writes_findings_packet", "sends_oacp_reply",
+    "submits_github_review",
+}
 
 
 class VerdictError(ValueError):
@@ -145,6 +150,15 @@ def normalize_verdict(data: dict[str, Any], *, findings_ref: str) -> dict[str, A
         nit["tier"] = tier
         nits.append(nit)
 
+    withheld = data.get("withheld_side_effects", [])
+    if not isinstance(withheld, list) or any(
+        not isinstance(effect, str) or effect not in SIDE_EFFECTS
+        for effect in withheld
+    ):
+        raise VerdictError("withheld_side_effects must be a list of known effect names")
+    if len(set(withheld)) != len(withheld):
+        raise VerdictError("withheld_side_effects must not contain duplicates")
+
     missing_nits = sorted(set(unresolved_nonblocking) - nit_sources)
     escalation = data.get("escalation")
     if escalation in (None, ""):
@@ -186,19 +200,23 @@ def normalize_verdict(data: dict[str, Any], *, findings_ref: str) -> dict[str, A
         body: dict[str, Any] = {
             "quality_gate_result": "pass",
             "merge_ready": True,
-            "review_round": round_number,
             "validated_head": reviewed_head,
             "nits": nits,
+            "review_round": round_number,
         }
     else:
         body = {
+            "quality_gate_result": "fail",
+            "merge_ready": False,
+            "validated_head": reviewed_head,
+            "nits": nits,
             "findings_packet": findings_ref,
             "round": round_number,
             "blocking_count": len(unresolved_blocking),
-            "validated_head": reviewed_head,
         }
         if escalation:
             body["escalation"] = escalation
+    body["withheld_side_effects"] = list(withheld)
     telemetry = data.get("telemetry")
     if telemetry:
         if not isinstance(telemetry, dict):

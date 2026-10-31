@@ -54,7 +54,7 @@ Require the current continuation-aware runtime before discovery:
 
 ```bash
 command -v oacp >/dev/null 2>&1 || {
-  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.4.3'" >&2
+  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.5.4'" >&2
   exit 1
 }
 OACP_VERSION="$(oacp --version 2>&1)" || {
@@ -68,8 +68,8 @@ import sys
 match = re.search(r"(\d+)\.(\d+)\.(\d+)", sys.argv[1])
 if not match:
     raise SystemExit(f"could not parse oacp version: {sys.argv[1]}")
-if tuple(int(part) for part in match.groups()) < (0, 4, 3):
-    raise SystemExit(f"oacp {sys.argv[1]} is older than required 0.4.3")
+if tuple(int(part) for part in match.groups()) < (0, 5, 4):
+    raise SystemExit(f"oacp {sys.argv[1]} is older than required 0.5.4")
 PY
 ```
 
@@ -85,12 +85,16 @@ If legacy watch or polling flags are present, stop and recommend
 
 ### 2. Resolve Project And Inbox
 
-If `--project` is provided, use it. Otherwise auto-detect:
+If `--project` is provided, use it. Otherwise inspect markers at the working
+repository and canonical main checkout, following symlinks. A linked worktree
+name is not a project identity:
 
 ```bash
 PROJECT="$(python3 - <<'PY'
 import json
 import os
+from pathlib import Path
+import subprocess
 
 def project_from_marker(path: str) -> str:
     if not (os.path.isfile(path) or os.path.islink(path)):
@@ -103,8 +107,16 @@ def project_from_marker(path: str) -> str:
     except Exception:
         return ""
 
-for marker in (".oacp", "workspace.json"):
-    project = project_from_marker(marker)
+roots = [Path.cwd()]
+common = subprocess.run(
+    ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    text=True, capture_output=True,
+)
+if common.returncode == 0:
+    roots.append(Path(common.stdout.strip()).parent)
+for marker in (root / name for root in dict.fromkeys(roots)
+               for name in (".oacp", "workspace.json")):
+    project = project_from_marker(str(marker))
     if project:
         print(project)
         break
@@ -174,7 +186,7 @@ fields. That value is mechanism-owned discovery state:
 
 Under `enforce`, a held row exposes only filesystem metadata. Never reconstruct
 or custom-parse its fields. If the lister does not report `verify_mode`, stop
-before parsing and ask for an OACP CLI/runtime at `>=0.4.3`; never silently
+before parsing and ask for an OACP CLI/runtime at `>=0.5.4`; never silently
 downgrade enforcement.
 
 Route every candidate path through the bundled reader. It resolves the active
@@ -238,13 +250,21 @@ Set `ACCEPTED_MESSAGE_SHA256` from the reader result and independently confirm
 that `shasum -a 256 "$MESSAGE_SNAPSHOT_RAW"` matches it before acting. Never
 replace the accepted snapshot or digest with a later live-path read.
 
+Before each message-authorized side effect, rerun the bundled reader on the
+top-level live inbox path into a separate recheck JSON file, without replacing
+the accepted raw snapshot or view. Require intake readiness and the identical
+accepted hash; a missing, replaced, held, or changed source pauses the action.
+Route only from the original accepted view. Verify every referenced packet or
+artifact path exists; never substitute a similarly named checkout file.
+
 Define explicit private-snapshot cleanup before routing. A shell `trap` cannot
 span separate Codex tool calls, so call this on every retained, rejected,
 failed, and successfully archived path:
 
 ```bash
 oacp_snapshot_cleanup() {
-  command rm -f -- "$MESSAGE_SNAPSHOT_RAW" "$MESSAGE_VIEW_JSON"
+  command rm -f -- "$MESSAGE_SNAPSHOT_RAW" "$MESSAGE_VIEW_JSON" \
+    "$MESSAGE_TMP_DIR/recheck.json"
   rmdir -- "$MESSAGE_TMP_DIR" 2>/dev/null || true
 }
 ```
@@ -290,166 +310,198 @@ delete, overwrite, copy-and-unlink, or retry with another mechanism.
 
 ### 4. Receiver Autonomy
 
-Apply the active OACP receiver-autonomy protocol before processing
-gate-eligible messages.
+The standard gate-eligible types are `task_request`, `question`,
+`brainstorm_request`, `brainstorm_followup`, and `handoff`. Review invocation
+candidates (`review_request` and a standalone `review_addressed`) also run the
+canonical evaluator's generic continuation-grant path when receiver
+configuration enables recognition. Coalesce addressed context with a newer
+same-PR request before evaluating an invocation. For each evaluated message, read
+[`references/autonomy.md`](references/autonomy.md) and follow its CLI-first
+adapter. In particular:
 
-Resolve the receiver policy:
+- resolve the active installed OACP package and its interpreter through the
+  [autonomy adapter](references/autonomy.md); use its bundled evaluator and
+  sibling outcome/finalizer writers consistently;
+- pass `--oacp-dir "$OACP_ROOT"`, capture the exact harness-stated serving
+  model from current-session metadata, and export it as `OACP_RUNTIME_MODEL`
+  for every gate invocation; force the variable unset when that signal is
+  unavailable, and never substitute requested-model configuration;
+- pass the exact `agents/codex/audit/autonomy_decisions` directory to
+  `--audit-dir`;
+- let signing-only configs with no `autonomy` block resolve conservatively to
+  `always_pause`;
+- use the evaluator-emitted decision, reason codes, schema version, completion
+  kind, co-occurring reasons, and provenance verbatim;
+- require the gate's `message_sha256` to equal the accepted snapshot hash;
+- treat gate exit `3` as terminal `intake_rejected`, with no autonomy record or
+  custom routing;
+- when mode is `warn` or `enforce`, attach authentication only after the audit
+  exists by verifying `MESSAGE_SNAPSHOT_RAW`, never by rereading the live inbox
+  path;
+- adopt an existing nonterminal peer audit instead of creating a duplicate.
 
-```bash
-CONFIG_PATH="${INBOX_DIR%/inbox}/config.yaml"
-```
+For a review invocation, auto-dispatch only on `decision: auto_accepted` with
+`continuation_grant_accepted` and the candidate type explicitly in
+`continuation_grant.scope.allowed_types`. Require the matching persisted audit;
+report the grant's `source_audit` and `source_message_id`. Pass its flat `scope`
+and concrete `scope_envelope` to the reviewer as execution bounds. Independently
+establish the approved repository/PR from prior authenticated review context
+and recorded human approval; a shared conversation or generic acceptance alone
+does not authorize another PR. Hold an unknown or mismatched review identity.
+The reviewer compares the declared head with the live full SHA; the kernel
+provides no head annotation. See the autonomy reference for these workflow
+checks, grant migration, and the manual-confirmation fallback.
 
-- Missing config -> `MODE=always_pause`.
-- Malformed config -> `MODE=always_pause`; write a paused audit decision with
-  `reason_codes: [config_malformed]` for gate-eligible messages.
-- Valid config -> `MODE=<autonomy.default_mode>` (`always_pause` or
-  `auto_review`) and `THRESHOLDS=<autonomy.auto_review_thresholds>`.
+Pure lifecycle traffic does not run the four task gates: `notification`,
+`follow_up`, `review_feedback`, `review_lgtm`, and `handoff_complete`.
+`review_addressed` stays context-only unless its type is explicitly granted or
+the human approves that invocation. Review recognition above does not run the
+four task gates; accepted invocations still require checkpoints and finalization.
 
-For gate-eligible message types (`task_request`, `question`,
-`brainstorm_request`, `brainstorm_followup`, `handoff`) read the package's
-[Codex autonomy adapter](references/autonomy.md) before acting. On receivers
-with continuation-grant
-recognition enabled, also run its review-continuation adapter for
-`review_request` and for `review_addressed` only when the grant explicitly
-lists it. The reference contains the full 0.4.3 evaluator:
+Before any action, tell the user the exact autonomy verdict and reason codes.
+`auto_accepted` may proceed without another task-admission prompt. `paused`
+uses the explicit approval path. Hard stops remain hard;
+`autonomy_hint: auto_proceed` is advisory only.
 
-1. Gate 1: message integrity and replay detection.
-2. Gate 2: declared `task_profile` and risk thresholds.
-3. Gate 3: deterministic hard stops and ambiguous file scope.
-4. Gate 4: runtime/workspace check.
+Before asking, check the current session and matching audit for explicit
+receiver-human approval of this exact message, scope, and intended effects.
+Reuse that approval while its identity, limits, and constraints still match;
+do not ask again merely because execution resumed. This does not admit a new
+message, bypass a hard stop, revive revoked authority, or replace live hash
+checks. A new review round needs its own approval or accepted continuation.
 
-Use the canonical checked-out autonomy evaluator when available; do not
-reimplement its reason codes or classifications. It owns granular threshold
-reasons, demotable versus non-demotable Gate-3 findings, `policy_auth`,
-continuation matching, and co-occurring reason codes. Every evaluated message
-writes a schema-version-2 audit YAML under:
+At round-1 review approval, offer approval plus an explicit bounded
+`approved_thread_continuation` grant alongside one-round-only approval and
+decline. Follow the autonomy reference's
+[round-one grant offer](references/autonomy.md#round-one-review-approval) for
+the displayed scope, separate grant decision, and persisted read-back. Later
+rounds within that accepted scope use the evaluator without re-asking.
 
-```text
-agents/<receiver>/audit/autonomy_decisions/<YYYYMMDDTHHMMSSZ>_<message-id>.yaml
-```
-
-Require the audit's `message_sha256` to match
-`ACCEPTED_MESSAGE_SHA256`, then attach authentication by verifying
-`$MESSAGE_SNAPSHOT_RAW` with `--attach-audit`. Never attach from a reread live
-path or hand-shape `message_auth`. Preserve the evaluator-stamped
-`completion_kind` and admission `final_state`; do not compose `pending`.
-Terminal bookkeeping updates the same audit with measured actuals, checkpoint,
-completion time, reply id, and artifacts. A partial audit is better than no
-audit.
-
-Pure notification and output lifecycle flows (`notification`, `follow_up`,
-`review_feedback`, `review_lgtm`, `handoff_complete`) do not run the four task
-gates. Review continuation is recognition of prior human run authority, not
-task admission.
-
-Verdicts:
-
-- `auto_accepted`: all gates passed in `auto_review`; processing may proceed
-  without human confirmation for gate-eligible work.
-- `paused`: `always_pause`, malformed config, missing profile, threshold
-  exceedance, hard stop, replay, expiry, or runtime failure; use the paused
-  handling path.
-
-For a `review_request`, dispatch without a per-round confirmation only when the
-canonical verdict is `auto_accepted` with
-`review_continuation_accepted`. Report and preserve its source audit/message
-and pass the accepted `permitted_side_effects` bound to the reviewer. Every
-other `review_continuation_*` result follows explicit confirmation. A recorded
-`review_continuation_head_mismatch` is advisory; the reviewer resolves and
-binds its verdict to the live full head.
-
-Hard stops are absolute. `autonomy_hint: auto_proceed` is advisory only and
-never overrides a pause.
-
-Threshold-exceeded checkpoint: after an auto-accepted task starts, self-pause
-if work expands beyond the declared `task_profile`. Notify the sender with a
-`notification` whose body opens with canonical text such as
-`Blocked: autonomy threshold exceeded - files_touched expected <N>, now <M>`,
-update the audit with `threshold_exceeded_post_accept`, and keep the original
-message for re-authorization.
-
-The shipped enforcement adapter is not available for Codex. Codex may inspect
-with `oacp envelope show`, but it must not compile, extend, or clear an
-envelope. Preserve `result.envelope_enforcement: none`. A human task approval
-and a standing continuation grant are separate decisions; never infer the
-latter.
+For a paused task, record the user's `approved`, `modified`, or `declined`
+decision in the same audit before acting or closing it; preserve an already
+recorded matching decision. Task approval and a
+standing continuation grant are separate decisions. A task-local approval
+covers capabilities declared in that profile, including `merges_pr: true`,
+but does not create future authority.
 
 ### 5. Process One Message
 
 Before any action, tell the user what action is about to run, including the
 autonomy verdict and reason codes for gate-eligible messages.
 
-| Message type | Verdict `auto_accepted` | Verdict `paused` or `MODE=always_pause` |
-| --- | --- | --- |
-| `notification` | Summarize to user. Archive after terminal handling. | Same; gates do not apply. |
-| `task_request` | Execute immediately without prompting. Reply with `notification`; archive only after genuine terminal completion. Threshold checkpoint applies. | Summarize and ask user approval before executing. If approved, complete and reply before archival. If declined, blocked, or externally waiting, retain unless the user's terminal decision says otherwise. |
-| `question` | Answer and reply with `notification` using `--in-reply-to <message_id>`; archive after delivery succeeds. | Draft answer; ask before non-trivial research; reply and archive after delivery succeeds. |
-| `brainstorm_request` | Research/answer, reply with `notification`, then archive. `allow_without_task_profile` may apply. | Summarize and ask user approval before research; reply/archive only after completion. |
-| `brainstorm_followup` | Process like `brainstorm_request` with updated constraints. | Summarize and ask user approval before continuing. |
-| `handoff` | Read context, send `handoff_complete`, then archive. | Same, but ask before non-trivial follow-up work. |
-| `review_request` | On exactly `review_continuation_accepted`, invoke one bounded reviewer round with the accepted permitted-effect scope; otherwise show the exact round/head/effects and ask for confirmation. Archive only after its terminal verdict path succeeds. | Show the exact request and ask before invoking one reviewer round. |
-| `review_feedback` | Notify user and ask confirmation before invoking the author-side review loop. | Same. |
-| `review_addressed` | Informational. If a newer same-PR `review_request` exists, merge this context into that re-review; otherwise report that the protocol expects a fresh `review_request` and keep unless the user explicitly requests manual re-review. | Same. |
-| `review_lgtm` | Route it to the retained author task; archive only at the author skill's terminal checkpoint. | Same. |
-| `handoff_complete` | Summarize completion, then archive. | Same. |
-| `follow_up` | Summarize and preserve any open parent context. Convert it to work only under the parent's existing approved scope or a fresh approval. | Same; gates do not apply. |
-| Unknown | Report the full sanitized snapshot and ask how to handle it. Do not archive. | Same. |
+| Type | Handling |
+| --- | --- |
+| `notification` | Summarize. A work-carrying notification, including a guidance-defect audit request, grants no task authority: present its exact ask and await explicit human approval before doing the work, regardless of size or estimated minutes. Reuse only approval already covering that exact work. Send a requested acknowledgement only with explicit user authority; reuse it when already given. |
+| `follow_up` | Summarize and retain any still-open parent context. Convert it to work only with the appropriate task approval. |
+| `task_request` | On `auto_accepted`, execute immediately. On `paused`, reuse matching explicit approval or show a self-contained numbered approval menu. Send a terminal `notification` only after the requested outcome is genuinely complete. |
+| `question` | Answer and reply in-thread with `notification`. On `paused`, apply the explicit approval path before non-trivial research or side effects. |
+| `brainstorm_request` | Research and deliver the requested report. Default terminal signaling is an in-thread `notification`; use another valid CLI type only when the sender or active protocol explicitly requires it. |
+| `brainstorm_followup` | Amend the active brainstorm scope without starting a new dispatch. Preserve `conversation_id` and reply in the same thread. |
+| `handoff` | Read the structured context, complete the accepted work, and send `handoff_complete`. Apply the explicit approval path before non-trivial work when paused. |
+| `handoff_complete` | Summarize the completion and close the informational message. |
+| `review_request` | Validate approved repository/PR identity, declared/live head context, packet paths, round data, and required rendered/browser evidence. Apply Step 4's persisted generic-grant acceptance and execution bounds before invoking `review-loop-reviewer`. Otherwise surface the exact request and effects, then reuse explicit approval for that request and round or ask before invocation. |
+| `review_feedback` | Surface the findings and route to `review-loop-author` within the retained author task's existing authority; ask only for uncovered work or effects. Keep the review request context intact. |
+| `review_addressed` | Coalesce context with a newer same-PR `review_request` and invoke only once. Otherwise apply Step 4's generic-grant path: its type must be explicitly allowed and the persisted decision accepted. Without that grant, retain as context until explicit approval for this invocation, reusing approval when already given. Archive only after terminal feedback or LGTM and required audit read-back. |
+| `review_lgtm` | Route back to the retained author task. For an approved private task declaring `merges_pr: true`, LGTM is a WIP milestone: merge only after exact-head approval and required checks pass, then send Done with the merge SHA. |
+| unknown | Show the full parsed message, ask for direction, and retain it. |
 
-If `related_pr` is missing for `review_request`, `review_feedback`,
-`review_addressed`, or `review_lgtm`, report and keep the file.
+Verified `review_feedback` and `review_lgtm` provide context for the retained
+author task. Continue without another prompt when that task's still-valid
+authority covers the same repository/PR, work, limits, and intended effects.
+Ask for any uncovered scope; feedback and LGTM do not create authority.
 
-Nonterminal task wait rule:
+Reviewer invocation still requires explicit per-round approval, even under
+`auto_review`, or an accepted human-approved `approved_thread_continuation`.
+The grant authorizes invocation, never the verdict or merge; outward effects
+remain bounded by its flat scope and the admitted envelope. A bare approval
+applies only to the declared item, not a standing merge or continuation grant.
 
-- If a `task_request` reaches a nonterminal external wait state, such as
-  `PR opened, pending user review/merge`, send the progress notification but
-  keep the original inbox message until the terminal completion notification
-  succeeds. Later completion replies must still use `--in-reply-to <message_id>`
-  so the sender's thread stays intact.
+When messages conflict, establish an explicit supersession from verified
+sender context; recency alone grants no replacement task authority. Pause the
+stale path and admit the replacement through its own applicable gate. Preserve
+both messages until their required terminal audit and archival steps succeed.
 
-Notification acknowledgement rule:
+A newer verified `notification` from the original task sender that explicitly
+retracts or voids a still-unadmitted task supersedes that task for intake
+purposes. Treat the retraction as lifecycle traffic, not as replacement work:
+do not evaluate the void task, create its autonomy audit, or exercise any task
+capability. Surface the exact pair and ask before an outward acknowledgement
+unless the current user instruction already authorizes one. When authorized,
+send one terminal `Rejected:` notification threaded to the original
+`task_request`, cite the retraction id and reason, verify delivery, then archive
+both accepted-hash-bound artifacts. If work already began or the retraction
+requests restoration or another remedial effect, stop and route that work
+through the ordinary task gate and approval path; lifecycle traffic does not
+authorize it.
 
-- If a `notification` asks for acknowledgement, ask the user whether to send a
-  receipt before archival.
-- Archive only after the approved reply succeeds, or after the user explicitly
-  declines a reply.
+### 5b. Send and Verify Replies
 
-Reply notification template:
+Use `oacp send --json`, `--body-file`, and `--in-reply-to "$MSG_ID"` for every
+reply. The latter inherits the conversation id when the parent can be found.
+Also pass `--conversation-id` with the original value from the accepted
+verified snapshot when present. Parent lookup may exclude archived messages;
+do not let a late reply silently start a new conversation. For an archived
+parent, check the supported CLI flags and dry-run the reply before sending;
+require its `parent_message_id` and `conversation_id` to match the accepted
+context. If that context is unavailable, retain the item and resolve it
+through verified intake rather than guessing a thread identifier.
+Set `CONVERSATION_ID` below from that snapshot, or to an empty string when the
+field is absent.
+Use only the message types accepted by `oacp send --help`; never invent a type
+such as `brainstorm_response`.
+
+For a structured YAML body, build the intended mapping and serialize it with
+a YAML library before signing. Reload the emitted body and require equality
+with that mapping: an unquoted `#` in a plain scalar can silently truncate
+references even when parsing succeeds. Apply this check to structured protocol
+bodies; ordinary Markdown notification bodies keep their existing format.
 
 ```bash
-oacp send "${PROJECT}" \
-  --oacp-dir "${OACP_ROOT}" \
-  --from codex \
-  --to "${MSG_FROM}" \
-  --type notification \
-  --subject "Re: ${MSG_SUBJECT}" \
-  --body "${REPLY_BODY}" \
-  --in-reply-to "${MSG_ID}"
+REPLY_BODY_FILE="$(mktemp)"
+SEND_JSON="$(mktemp)"
+THREAD_ARGS=()
+if [ -n "$CONVERSATION_ID" ]; then
+  THREAD_ARGS=(--conversation-id "$CONVERSATION_ID")
+fi
+printf '%s\n' "$REPLY_BODY" >"$REPLY_BODY_FILE"
+oacp send "$PROJECT" --oacp-dir "$OACP_ROOT" \
+  --from codex --to "$MSG_FROM" --type "$REPLY_TYPE" \
+  --subject "Re: $MSG_SUBJECT" --body-file "$REPLY_BODY_FILE" \
+  --in-reply-to "$MSG_ID" "${THREAD_ARGS[@]}" --json >"$SEND_JSON"
 ```
 
-Handoff completion template:
+Parse `message_id`, `inbox_path`, and `outbox_path` from the result. Verify both
+paths exist and their bytes match before treating delivery as successful.
+Read back the sent artifact's `parent_message_id` and, when available, original
+`conversation_id`; require the same values checked before sending. A lookup
+warning is not evidence that threading was preserved. On a mismatch, retain
+the signed artifacts and correct the thread explicitly rather than editing
+them or blindly resending. Capture the reply message id for the autonomy audit.
+Do not search filenames by message id: the filename suffix and YAML id use
+different hashes.
 
-```bash
-oacp send "${PROJECT}" \
-  --oacp-dir "${OACP_ROOT}" \
-  --from codex \
-  --to "${MSG_FROM}" \
-  --type handoff_complete \
-  --subject "Handoff complete: ${MSG_SUBJECT}" \
-  --body "${REPLY_BODY}" \
-  --in-reply-to "${MSG_ID}"
-```
+Keep subjects at most 200 characters and bodies at most 20,000 characters. A
+larger deliverable belongs in the sender outbox or another durable artifact;
+put its path and a complete concise index in the reply. `--body-file` avoids
+shell mangling but does not bypass the body cap.
 
-After every required reply, audit update, state read-back, and side effect has
-succeeded, archive against the first accepted digest:
+For dispatched review inputs, the reviewer owns terminal finalization and
+archival through this intake boundary; consume its result and rescan without
+finalizing or moving the same input a second time.
+
+For other gate-eligible work, follow the autonomy adapter's canonical checkpoint,
+finalization, and validation operations before archival. Never hand-edit the
+result block. Keep nonterminal or externally waiting work in the inbox.
+After all required work, delivery checks, audit updates, and read-back assertions
+succeed, archive against the accepted digest:
 
 ```bash
 oacp_archive "$INBOX_DIR" "$(basename -- "$MSG_FILE")" \
   "$ACCEPTED_MESSAGE_SHA256"
 ```
 
-Only after archival succeeds, or after a retained outcome has been fully
-reported, call `oacp_snapshot_cleanup`. A progress reply is not terminal
-completion, and successful sending alone does not prove archival.
+Only after archival succeeds, or a retained outcome is reported, run
+`oacp_snapshot_cleanup`. A progress reply is not terminal completion.
 
 ### 6. Single-Pass Drain Loop
 
@@ -487,20 +539,25 @@ Retained: <count> (expired/malformed/unknown/awaiting-approval)
 
 ## Safety Rules
 
+- Work-carrying notifications follow the paused task approval boundary;
+  message type or an estimate below five minutes never authorizes execution.
+
 - Always tell the user what action is about to run before running it.
 - `task_request`, `question`, `brainstorm_request`, `brainstorm_followup`, and
   `handoff` require explicit user approval unless Step 4 returned
   `auto_accepted`.
-- `review_request`, `review_feedback`, and manual `review_addressed` re-review
+- `review_request` and standalone `review_addressed` re-review
   require explicit user confirmation before triggering review-loop skills,
-  except an executed canonical `review_continuation_accepted` result whose
-  permitted-effect scope is passed unchanged to the reviewer.
+  except an executed canonical `continuation_grant_accepted` result whose
+  allowed types and flat scope cover the invocation and effects. Author-side
+  lifecycle context may reuse the retained author task's still-valid authority.
 - Never archive messages that were not successfully and terminally processed.
 - Never process messages outside `agents/codex/inbox`.
 - Hard stops are absolute and can only be processed manually under paused rules
   after surfacing them to the user.
 - Audit events are mandatory for every gate-eligible autonomy decision,
-  including `always_pause` and malformed config pauses.
+  including `always_pause` and malformed config pauses; an enforce intake
+  rejection has quarantine evidence and no autonomy audit.
 
 Approval and confirmation prompts must be self-contained. Include:
 
@@ -520,6 +577,7 @@ Approval and confirmation prompts must be self-contained. Include:
 - Sender writes both recipient inbox and sender outbox; recipient preserves the
   exact handled inbox bytes through fail-closed archival.
 - Receiver autonomy is opt-in. With no `agents/<receiver>/config.yaml`, the
-  skill behaves like the pre-autonomy version.
+  skill pauses task admission conservatively. A new paused task always waits
+  for human approval; there is no short-task exception.
 - Spec authority: when the active OACP protocol and this skill disagree, fix
   this skill.

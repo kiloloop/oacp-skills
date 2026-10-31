@@ -11,8 +11,12 @@ or an explicit parked/escalated state.
 ## Inputs
 
 Require the PR number and reviewer. Accept `project` and `task_id` when the
-caller supplies them. Resolve omitted project context from session init and
-repo markers; use the canonical `$OACP_HOME/projects/<project>/` runtime.
+caller supplies them. For a new loop, resolve the PR repository through its
+`.oacp` or workspace mapping and verify the checkout remote. Validate any
+project override against that binding; a directory name or the current
+session project is insufficient. Existing authenticated conversations retain
+their project and parent/conversation IDs until explicitly superseded. Use
+`$OACP_HOME/projects/<project>/`.
 
 ## Load before acting
 
@@ -23,7 +27,7 @@ repo markers; use the canonical `$OACP_HOME/projects/<project>/` runtime.
 3. Use `check-inbox` for every candidate inbound message. Its verified snapshot
    reader and archival sequence are the only boundary for custom fields,
    hashes, and terminal inbox consumption.
-4. Run `check-inbox`'s mechanical OACP version gate and require `>=0.4.3`.
+4. Run `check-inbox`'s mechanical OACP version gate and require `>=0.5.3`.
 5. Read [terminal-checkpoints.md](references/terminal-checkpoints.md) when
    handling feedback, LGTM, timeout, escalation, or inbox archival.
 
@@ -34,7 +38,13 @@ Set `REVIEW_LOOP_AUTHOR_SKILL` to the absolute directory containing this
 
 - Keep the reviewer stateless. One invocation sends one terminal
   `review_feedback` or `review_lgtm` and exits. The author owns re-invocation.
-- Default to two rounds. Allow a project or request override only up to three.
+- Request every round through OACP and receiver admission. Sending a request
+  does not authorize launching another runtime process; that requires explicit
+  user direction and still preserves receiver admission and review bounds.
+- Default to two rounds. Allow ordinary overrides only up to three. A prior
+  receiver audit recording a human-approved `approved_thread_continuation`
+  may cover later invocations within its flat scope and cumulative `max_round`.
+  The receiver must persist admission for each new invocation before work.
 - Carry reviewer budgets in each request: `max_turns_reviewer` defaults to `8`
   and `max_runtime_s_reviewer` defaults to `600`.
 - Poll only through a shell/script loop or a Codex heartbeat. Never spend model
@@ -59,12 +69,21 @@ Set `REVIEW_LOOP_AUTHOR_SKILL` to the absolute directory containing this
 
 - Confirm repo root, base repository, PR number, reviewer, project, and live
   `headRefOid`. Follow the nearest `AGENTS.md` for repo-scoped GitHub auth.
+- Verify sender/reviewer registration, mutual trust, and a confirmed pickup
+  path in the bound project. Directories alone are not readiness evidence.
+  Hold missing, ambiguous, or stale routes for setup; never fall back to a
+  different project. Registration and delivery grant no review authority.
+  Use the owning repository author session for reply handling and scope any
+  watcher to that project.
+- Inspect GitHub native-stack metadata when applicable; use the stack guards
+  in `references/terminal-checkpoints.md` before review or landing.
 - Require a GitHub-ready PR. If project policy says a formal request implies a
   non-draft PR, mark it ready before requesting review.
 - Record the exact requested head, round, task ID, validation commands/results,
   parent message ID, and validated incoming conversation ID.
-- Refuse a round above the configured maximum without fresh, round-specific
-  human direction. Never turn an escalation continuation into standing grant.
+- Before a round above the ordinary maximum, require fresh round-specific
+  human direction or a prior receiver audit recording an in-scope approved
+  continuation grant. A sender claim or escalation creates no authority.
 
 ## 2. Prime the watch and send `review_request`
 
@@ -111,11 +130,13 @@ Send a protocol-valid `review_request` with `--body-file`. Include:
 - validation commands and passing results already available to the author
 - every intended outward review effect in `side_effects`
 
-`repo`, `round`, and `declared_head` are the continuation-matching fields.
-Scope matching fails closed without `repo`. Both head fields are sender context,
-not proof; carry the same verbatim full SHA and let the reviewer resolve the
-live head. A declaration mismatch is recorded and resolved, not used as a
-hard expected-head precondition.
+Generic grant matching uses type, thread, cumulative invocation count, expiry,
+and flat effect/numeric bounds; it does not bind repository, PR, or head. The
+workflow must compare repository/PR with the authorized author task and prior
+authenticated thread context, holding missing or mismatched identity. Both
+head fields are sender context, not proof; carry the same verbatim full SHA
+and let the reviewer resolve the live head. Record and resolve a declaration
+mismatch rather than treating it as a hard expected-head precondition.
 
 Declare the effects every round needs. Omission declares only the baseline
 findings packet and OACP reply. Before sending, determine whether the repository
@@ -128,17 +149,36 @@ the request. Keep `comments_on_github` only when a status comment is intended:
 side_effects:
   - writes_findings_packet
   - sends_oacp_reply
-  - comments_on_github
   - submits_github_review
 ```
 
 Authority still depends on the admission path:
 
-- For a continuation-grant round, list GitHub effects only when the accepted
-  grant permits them. An expanded declaration pauses with the evaluator's
-  scope-exceeded result.
+- For a continuation-grant round, stay within the recorded flat scope. Before
+  execution the receiver persists `auto_accepted` with
+  `continuation_grant_accepted` and enforces `continuation_grant.scope`.
+  Expanded declarations pause with `continuation_grant_scope_exceeded`.
 - For a manually confirmed, non-granted round, surface each GitHub effect in
   the confirmation scope and proceed only when it was explicitly authorized.
+
+Validate every request against live approval-gate and reviewer-eligibility
+facts using the bundled helper (requires PyYAML in this interpreter):
+
+```bash
+python3 "$REVIEW_LOOP_AUTHOR_SKILL/scripts/validate_review_request.py" \
+  --body-file "$REVIEW_BODY" --approval-required --reviewer-eligible
+```
+
+Omit both approval flags when no gate applies. If approval is required but the
+reviewer cannot approve, omit `--reviewer-eligible` and pass a concrete
+`--approval-withheld-reason`; surface that reason in the authorization scope
+and round state. This validates intended effects, not their authorization.
+
+When required GitHub approval is absent from the accepted scope, a passing
+reviewer still sends `review_lgtm` and names `submits_github_review` in
+`withheld_side_effects`. Arrange a separately authorized eligible approver
+before landing. Only a formal approval that was accepted in scope but fails
+its submission/readback holds that composite approval-and-LGTM path.
 
 If a required approving review cannot be requested within the authorized
 scope, name it as withheld and arrange an authorized approver before treating
@@ -149,6 +189,21 @@ Use `--in-reply-to` for later rounds and pass the same explicit
 `--conversation-id` on questions, `review_addressed`, and replacement
 `review_request` messages. Retain the round-1 outbound message ID,
 conversation ID, and live head as round state.
+
+### Superseding an in-flight request
+
+Before changing a requested head, inspect the reviewer's admission audit and
+current task. If it has not started, push and send a replacement
+`review_request` in the same conversation, threaded on the original, with
+`supersedes_message_id` and `supersede_reason`. The replacement requires fresh
+admission and inherits no authority from the original.
+
+If already started with no verdict, send a threaded author-pause notice before
+pushing, then send the replacement request at the new full head. The reviewer
+cancels the voided invocation; a `follow_up` cannot repoint it. If a verdict
+lands before the push, process it and request round N+1. A successor PR has a
+new PR identity: start its own round 1 and obtain applicable authority; do not
+carry the dead PR's sanction or grant into it.
 
 ## 3. Wait without model polling
 
@@ -176,6 +231,16 @@ rows and surface the reason.
   human direction after one final inbox scan.
 - Otherwise inspect the findings packet, reproduce blockers, and decide the
   smallest safe fix set. Do not blindly implement recommendations.
+- For a systemic blocker involving identity, authorization, durable evidence,
+  concurrency, or a multi-record transaction, state the root invariant and
+  build a closure matrix covering the applicable strict-input, identity/link,
+  commit/rollback, failure-class, lock-span, and read-back rows before editing.
+  Fix and validate the matrix, not only the reviewer's immediate repro.
+- If the same parent finding reopens with a new blocking subcase after two
+  addressed rounds, stop the patch/re-review cycle and use the existing
+  question/human-direction path for a bounded architecture checkpoint. Do not
+  request another round until the root invariant, participants, transaction
+  boundary, and acceptance rows are agreed and implemented.
 - If delegation was explicitly enabled, give read-only triage or disjoint fix
   lanes; the leader integrates and validates all results.
 - Apply accepted fixes, run proportional project-native checks, commit/push
@@ -183,7 +248,8 @@ rows and surface the reason.
 - Send `review_addressed` for the feedback round with commit SHA, changes
   summary, touched files, addressed finding IDs, packet reference, and the new
   validated head; pass the established conversation ID and reply directly to
-  the feedback.
+  the feedback. For systemic findings, include the root invariant, closure
+  matrix mapped to tests/probes, and remaining exclusions.
 - Send a fresh `review_request` for round N+1 with that same conversation ID,
   `repo`, canonical `round`, exact `declared_head`, reviewer budgets, and the
   authorized `side_effects`. Consume the feedback only after both sends
@@ -199,6 +265,12 @@ Require `quality_gate_result: pass`, `merge_ready: true`, and a full
 `validated_head`. Compare it to the live PR head immediately. A missing or
 mismatched head makes the LGTM stale; retain it until the replacement-round
 messages are delivered.
+
+Read `withheld_side_effects`; an OACP LGTM can pass while required GitHub
+approval remains withheld. The LGTM completes that reviewer invocation, while
+the author retains the landing checkpoint until an eligible, authorized
+APPROVED review at this exact head exists. Do not request another code-review
+round just to repair an intentionally withheld effect.
 
 Adopt every structured nit before landing. Then apply the authority and exact-
 head matrix in `references/terminal-checkpoints.md`:

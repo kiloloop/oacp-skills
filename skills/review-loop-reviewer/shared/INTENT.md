@@ -1,67 +1,66 @@
 # review-loop-reviewer — Shared Intent
 
-## What it does
+## Contract
 
-Runs the reviewer side of an asynchronous code review loop. Pre-gathers PR diff and context, spawns an analysis subagent to review the code, then processes the verdict — writing a findings packet and sending feedback or LGTM to the author via inbox.
+Run one stateless review of one exact live PR head. Verify the request, establish
+admission and bounds, gather context, evaluate concrete findings, deliver one
+terminal `review_feedback` or `review_lgtm`, finalize evidence, and exit. The
+author owns every subsequent invocation.
 
-## Architecture
+## Admission and identity
 
-Hybrid leader/subagent split:
+Use verified intake and immutable snapshots. Coalesce addressed context with a
+newer matching request; do not execute twice. A standalone `review_addressed`
+requires explicit human approval or an accepted grant listing that type.
+`auto_accepted` plus `continuation_grant_accepted` is valid only with a persisted
+matching audit and its flat type/time/file/effect bounds. Independently verify
+the human-approved repository/PR; generic thread matching does not establish it.
 
-- **Leader**: handles all external I/O — git fetch, GitHub API calls, inbox reads/deletes, findings packet writes, message sending
-- **Analysis subagent**: read-only — examines the diff (passed in via prompt), reads source files for context, produces a structured verdict with findings YAML. No shell access, no file writes.
+Resolve the live full head independently. A missing or mismatched declaration is
+recorded and resolved, not silently trusted. Bind findings, tests and every verdict
+to the reviewed head; movement during the invocation invalidates that verdict.
+Materialized source must preserve the committed bytes, and Git-dependent checks
+need an isolated checkout of the exact commit.
 
-This separation ensures the subagent cannot accidentally modify the repository or interact with external services.
+## Review and quality gate
 
-## Message types
+Review the changed behavior against the stated scope and its callers. Prioritize
+unresolved findings and regression signals on later rounds. State the threat
+model and exclusions; for identity, authorization, concurrency or durable-evidence
+changes, test the invariant and relevant failure/recovery boundaries. Delegate
+bounded analysis only when allowed, retaining leader responsibility for effects.
 
-| Direction | Type | Purpose |
-|-----------|------|---------|
-| Receives | `review_request` | Trigger to review a PR (includes round number) |
-| Receives | `review_addressed` | Author has pushed fixes (poll mode only) |
-| Sends | `review_feedback` | Findings packet reference with blocking count |
-| Sends | `review_lgtm` | Approval — quality gate passed |
+Findings include a stable ID, severity, blocking flag, status, precise location,
+reproduction/evidence, impact and recommendation. Only `fixed` or `wont_fix`
+resolves a finding. All P0/P1 and blocking P2 findings block approval. Deferred
+nonblocking P2/P3 findings become structured nits with an owner and next action.
+The quality gate requires passing validation and no unresolved blockers.
 
-## Protocol references
+## Effects and termination
 
-- **Findings packet format**: YAML stored at `$OACP_HOME/projects/<project>/packets/findings/`
+Write the validated findings packet before side effects. Perform only admitted
+GitHub effects; formal review and status comment permissions are distinct. Never
+approve one's own PR. Record excluded requested effects in
+`withheld_side_effects`. If approval is absent or false in the accepted scope,
+send the passing quality verdict with
+`submits_github_review` withheld when the landing gate still needs it. An
+eligible, separately authorized approver must satisfy that gate before merge.
+This accepted withheld-effect path always has a terminal OACP response.
 
-  ```yaml
-  packet_id: "<date>_<topic>_<agent>_r<round>"
-  reviewer: "<agent>"
-  round: <N>
-  summary:
-    verdict: "pass|fail"
-    blocking_count: <N>
-    non_blocking_count: <N>
-  findings:
-    - id: "F-001"
-      severity: "P0|P1|P2|P3"
-      blocking: true|false
-      status: "open"
-      area: "code|docs|tests|protocol"
-      file: "<path>"
-      line: <N>
-      recommendation: "<suggested fix>"
-  ```
+Codex treats an approval it accepted in scope as composite delivery: submit or
+read back the eligible exact-head approval before its LGTM; an in-scope failure,
+self-review restriction or missing proof retains the request. The Claude slice
+can report its signed quality verdict with withheld effects under its own
+stated fallback ordering. Neither runtime may count a status comment or an
+OACP-only verdict as an independent required GitHub approval.
+Recheck the live head after GitHub effects and before the signed terminal reply.
 
-- **Quality gate**: Passes when zero P0 and zero blocking findings are open
-- **Severity scale**: P0 (critical) → P1 (major) → P2 (minor) → P3 (nit)
+A successful reply is delivered with the original parent/conversation binding,
+then the audit is finalized and read back, and accepted inputs are archived
+without clobbering or changing signed bytes. Never wait in the reviewer for fixes.
 
-## Reviewer heuristics
-
-1. Only review issues in the diff — pre-existing issues belong in separate tickets
-2. Compare diff against PR description — flag discrepancies
-3. Mark blocking only for bugs, security issues, or protocol violations
-4. Include a concrete recommendation for every finding
-5. On re-review rounds, verify previous findings were addressed
-6. Verify breaking changes are documented
-
-## Acceptance criteria
-
-- Full diff analyzed against PR description
-- Findings packet written with correct format
-- Quality gate evaluated (pass/fail)
-- Appropriate message sent: `review_lgtm` (pass) or `review_feedback` (fail)
-- PR comment posted for human visibility (status only)
-- Self-review guard: skip GitHub approval if reviewer authored the PR
+A sender cancellation is handled while evidence is still live: checkpoint any
+already-realized effects first, then cancel with supported work clock/count and
+landed-deliverable evidence. Never pass unsupported effect flags to cancellation
+or archive a live audit. Budget exhaustion produces the protocol's terminal
+escalation; an extension requires actual human authority before more work.

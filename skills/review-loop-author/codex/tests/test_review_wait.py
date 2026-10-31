@@ -67,6 +67,40 @@ class ReviewWaitTests(unittest.TestCase):
         self.assertEqual(result["status"], "new_message")
         self.assertEqual(result["candidates"], rows)
 
+    def test_canonical_inbox_wrapper_counts_only_candidates(self) -> None:
+        # Realistic inbox formats with synthetic names.
+        for candidates, expected in (([], "no_change"), ([{"path": "held.yaml"}], "new_message")):
+            for candidate_key in ("messages", "held_messages"):
+                with self.subTest(candidates=candidates, candidate_key=candidate_key):
+                    rows = {"project": "demo", "agents": [{
+                        "agent": "codex", candidate_key: candidates,
+                    }]}
+
+                    def runner(command):
+                        return subprocess.CompletedProcess(command, 0, json.dumps(rows), "")
+
+                    result = review_wait.direct_scan(
+                        executable="oacp", project="demo", agent="codex",
+                        oacp_dir=Path("/tmp/oacp"), runner=runner,
+                    )
+                    self.assertEqual(result["status"], expected)
+                    self.assertEqual(result["candidates"], rows)
+
+    def test_unknown_or_malformed_inbox_shape_is_error(self) -> None:
+        for rows in ({"new_shape": [{"path": "message.yaml"}]}, {"agents": {}},
+                     {"agents": [{}]}, {"agents": [{"messages": None}]}, 3):
+            with self.subTest(rows=rows):
+                def runner(command):
+                    return subprocess.CompletedProcess(command, 0, json.dumps(rows), "")
+
+                result = review_wait.direct_scan(
+                    executable="oacp", project="demo", agent="codex",
+                    oacp_dir=Path("/tmp/oacp"), runner=runner,
+                )
+                self.assertEqual(result["status"], "error")
+                self.assertIsNone(result["candidates"])
+                self.assertTrue(result["error"])
+
     def test_wait_returns_on_second_scan(self) -> None:
         results = iter(
             [
@@ -110,6 +144,17 @@ class ReviewWaitTests(unittest.TestCase):
         self.assertEqual(exit_code, review_wait.EXIT_TIMEOUT)
         self.assertEqual(calls, ["final"])
         self.assertEqual(result["final_inbox"]["rows"][0]["file"], "late.yaml")
+
+    def test_unreadable_final_snapshot_is_error_not_timeout(self) -> None:
+        result, exit_code = review_wait.wait_for_change(
+            lambda: {"status": "no_change", "events": [], "error": None},
+            lambda: {"ok": False, "rows": None, "error": "unrecognized inbox JSON mapping"},
+            timeout_seconds=0, interval_seconds=1, now=lambda: 1.0,
+            sleep=lambda seconds: None,
+        )
+        self.assertEqual(exit_code, review_wait.EXIT_ERROR)
+        self.assertEqual(result["status"], "error")
+        self.assertFalse(result["final_inbox"]["ok"])
 
     def test_watch_failure_stops_without_waiting(self) -> None:
         result, exit_code = review_wait.wait_for_change(

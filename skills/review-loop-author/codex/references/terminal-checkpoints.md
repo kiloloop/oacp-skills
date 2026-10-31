@@ -12,12 +12,12 @@ Record at least:
 pr: 123
 repo: example-org/example
 branch: codex/example
-declared_head: 0123456789abcdef0123456789abcdef01234567
-requested_head: 0123456789abcdef0123456789abcdef01234567
+declared_head: "0123456789abcdef0123456789abcdef01234567"
+requested_head: "0123456789abcdef0123456789abcdef01234567"
 diff_summary: "Short scope summary"
 round: 1
 review_round: 1
-max_review_rounds: 2
+max_rounds: 2
 max_turns_reviewer: 8
 max_runtime_s_reviewer: 600
 side_effects:
@@ -36,8 +36,13 @@ direct parent. Include `submits_github_review` only when a formal approving
 review is required and authorized; add `comments_on_github` separately only
 when a status comment is intended.
 
-The default maximum is two rounds. A project/request may set three. Values
-above three require a protocol change, not local skill discretion.
+The ordinary maximum is two rounds; a project/request may set three. Later
+invocations require fresh round-specific human direction or a prior recorded
+human-approved `approved_thread_continuation`, within its cumulative
+`max_round`, expiry, numeric bounds, and flat effect scope. Admission of every
+new invocation remains the receiver's responsibility; sender claims do not
+extend authority. Use `scripts/validate_review_request.py` with the live
+approval-gate facts before sending.
 
 ## Verified intake and archival guard
 
@@ -64,7 +69,7 @@ read-back must also succeed. Perform terminal consumption through
 | Wrong sender, PR, round, thread, or packet | Surface mismatch and retain | No |
 | Held, invalid, or unreadable | Surface verification/schema state | No |
 | `reviewer_budget_exceeded` | Final scan, then request human direction | No |
-| Maximum round reached | Final scan, then escalate | No |
+| Next round exceeds current authority | Final scan, then obtain fresh human direction | No |
 | Fixes not yet validated/pushed | Report work in progress | No |
 | `review_addressed` or replacement request failed | Retry safely | No |
 | Both sends and required state read-back succeeded | Recheck snapshot hash | Yes, if unchanged |
@@ -111,6 +116,12 @@ Before every authorized merge:
    as `--match-head-commit <validated_head>`.
 5. Verify the landed result and capture the merge commit SHA.
 
+A required approval absent from the accepted scope is reported in the terminal
+OACP reply's `withheld_side_effects`; it does not suppress a passing
+`review_lgtm`. The author arranges an independently authorized eligible approver
+before landing. An approval accepted in scope whose submission or exact-head
+readback fails instead holds the reviewer's composite approval/LGTM path.
+
 An identity that cannot approve its own PR cannot satisfy a required formal
 approval gate. A permitted status comment is informational and remains a
 separate `comments_on_github` effect.
@@ -134,3 +145,23 @@ The author's wait budget owns timeout handling:
 
 Timeout does not grant authority to re-invoke beyond the round cap, merge,
 archive input, or treat a reviewer as having approved.
+
+## Native stacks
+
+Establish native membership from GitHub metadata, not a branch chain. Capture
+ordered PR membership, direct dependency/base heads, and every member's full
+head. Review the requested layer against its direct predecessor; a changed
+dependency or membership invalidates the comparison even if this head is stable.
+Do not apply a classic child-base retarget or successor-PR recipe to native
+members. Any moved head needs fresh exact-head review; retained GitHub approval
+alone is insufficient.
+
+A native-stack merge selects the entire unmerged bottom prefix. Require
+per-member merge authority, exact-head LGTM, required APPROVED review at that
+head, and passing checks for every selected PR. Hold unknown membership or
+changed dependencies. Consult current official GitHub stack/async-merge API
+documentation before the effect; a plain synchronous merge is insufficient.
+Use an explicit selected PR, reviewed SHA, and no rule bypass. Queue admission
+or an accepted async request is unfinished: verify every member actually landed
+and record its merge SHA before Done. Re-read remaining heads after partial
+landing. Stack membership never expands a grant to another PR.

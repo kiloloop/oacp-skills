@@ -21,6 +21,15 @@ publication, repository publication, and external actions independently safe.
 Read the nearest `AGENTS.md` first. It owns repository identity, persistent
 branch/worktree policy, validation, authentication, and publication rules.
 
+Check the session project's `.no-org-memory` marker and applicable `AGENTS.md`
+before org-memory work. An opt-out skips debrief, events, and memory publication,
+including dry-run variants, with `skipped: project_opt_out`. An ambient store
+or an additional cleanup repository cannot override it.
+
+Set `WRAP_UP_SKILL` to the absolute directory containing this `SKILL.md` before
+invoking bundled resources. Resolve the active memory home from project binding
+or current runtime metadata; do not select a home from a repository basename.
+
 ## 1. Capture a read-only snapshot
 
 Confirm the operational root and capture status before changing anything:
@@ -33,14 +42,50 @@ git -C "$REPO_ROOT" worktree list --porcelain
 git -C "$REPO_ROOT" worktree prune --dry-run --verbose
 ```
 
-Resolve the base branch and every persistent branch/worktree from
-`AGENTS.md`. Establish the repository-authorized GitHub identity when the
-squash-merge pass is needed, then preview branch cleanup:
+Resolve the base and persistent branches/worktrees from `AGENTS.md`.
+
+First set `MEMORY_HOME` exactly as debrief does: use the main repository's
+resolved `.agent-memory.json` home when bound, otherwise
+`${OACP_HOME:-$HOME/oacp}`. Inspect the binding with
+`env -u AGENT_MEMORY_HOME -u OACP_HOME agent-memory status`, or read the exact
+binding and resolve a relative home against its directory. Stop on an invalid
+binding. Pass this same value to the audit and subsequent debrief/publication;
+an ambient `AGENT_MEMORY_HOME` must not redirect either step. Then run the
+bundled advisory snapshot (read-only; Python standard library):
 
 ```bash
-bash "$SKILL_DIR/scripts/cleanup_branches.sh" "$REPO_ROOT" --dry-run \
-  --base "$BASE_BRANCH" [--keep <persistent-branch>]...
+python3 "$WRAP_UP_SKILL/scripts/wrap_up_audit.py" --repo "$REPO_ROOT" --json \
+  --memory-home "${MEMORY_HOME:?resolve it as debrief does}" \
+  [--keep-branch <persistent-branch>]... [--keep-worktree <persistent-path>]... \
+  [--keep-branch-prefix <peer-runtime/>]... \
+  [--owned-branch <created-branch>]... [--owned-worktree <created-path>]...
 ```
+
+Supply authorized `GH_TOKEN`/`GITHUB_TOKEN` only when PR reads are needed, or
+`--allow-ambient-gh` only after repository policy permits the verified human
+identity. Otherwise accept skipped PR state. Helper recommendations never
+authorize removal: independently apply every guard in step 2 and the cleanup
+reference, including session ownership and exact merged head. Pass ownership
+flags only from this session's recorded creation evidence; absent ownership,
+failed status, unknown repository identity, or diverged tips are keep outcomes.
+The snapshot includes `local_tip`, `pr_head_oid`, and the actual worktree path.
+Ancestry candidates use safe deletion; same-repository squash evidence permits
+a force-delete suggestion only after full head equality.
+
+For standalone callers, the helper's CLI-compatible fallback order is
+`--memory-home`, `AGENT_MEMORY_HOME`, `OACP_HOME`,
+nearest valid `.agent-memory.json` binding, canonical workspace marker, then
+`~/agent-memory`. A malformed nearest binding is an error, never a fallback.
+The wrap-up workflow always passes the debrief-resolved home explicitly instead.
+The inbox home remains separate (`OACP_HOME`, otherwise `~/oacp`); a memory
+binding does not imply an OACP inbox. No workspace directory convention
+selects a memory store.
+
+If this session created an exact branch or worktree in a sibling repository,
+audit that repository under its own instructions and auth policy. Cleanup
+scope covers only those recorded artifacts; a runtime prefix or `.worktrees/`
+location is not ownership. General sibling cleanup and publication require
+separate scope. Keep each repository's candidates and decisions separate.
 
 Use `oacp inbox --json` for the current Codex project. Distinguish ordinary
 pending messages from held-unverified enforce-mode rows. Never parse held
@@ -54,11 +99,11 @@ exists or a snapshot command fails.
 Skip all mutations in dry-run mode. In a full run, the invocation authorizes
 only the local candidates that satisfy every guard below.
 
-Run the packaged two-pass branch helper after passing all persistent branches
-as `--keep`. Its ancestry pass uses safe `git branch -d`; its squash pass
-uses `-D` only when the local tip exactly equals a merged PR's
-`headRefOid`. A `MERGED` state alone, a missing remote branch, or a
-post-merge local tip never authorizes deletion.
+Use the cleanup reference's ancestry and squash passes. Safe-delete ancestry
+branches with `git branch -d`; a full wrap-up authorizes force deletion only of
+an exact session-created squash-merged branch after confirming `MERGED` and
+local tip equality with the merged PR's `headRefOid`. Pre-existing branches
+need separate force-cleanup authority. A vanished remote is not merge evidence.
 
 For worktrees:
 
@@ -79,8 +124,8 @@ is not wrap-up cleanup: report queued paths and leave them for
 
 ## 3. Run debrief
 
-Invoke `$debrief` using project auto-detection. This attempt is required, but
-failure is non-fatal: report it and continue. Do not fabricate a debrief when
+Unless the project opted out, invoke `$debrief` using project auto-detection.
+This attempt is required, but failure is non-fatal: report it and continue. Do not fabricate a debrief when
 the skill fails. In dry-run mode invoke `$debrief --dry-run`.
 
 ## 4. Write significant org-memory events
@@ -108,11 +153,12 @@ Expand only when evidence indicates drift. Route release-wide migrations,
 multi-skill capability changes, and context-budget audits to
 `$audit-oacp-skills`.
 
-Dry-run keeps this audit read-only. If changes are proposed, pause and relay
-the complete approval menu: recommendation, numbered items, target files and
-repos, exact outcomes, and allowed replies. Apply only approved edits. After
-the user resolves the menu, continue without a second publication question
-unless the user narrowed or disabled publication.
+Dry-run keeps this audit read-only. Match findings against the user's existing
+approved files and outcomes first; apply already approved changes without
+asking again. Pause only for new scope and relay the complete approval menu:
+recommendation, numbered items, target files and repositories, exact outcomes,
+and allowed replies. After the user resolves it, continue without a second
+publication question unless publication was narrowed or disabled.
 
 A pause must report all state gathered so far and every deferred cleanup,
 event, memory, commit, and push action. Use
@@ -121,13 +167,13 @@ report.
 
 ## 6. Publish memory and repository changes
 
-A full wrap-up publishes OACP memory once and commits/pushes only bounded
-approved repository changes. Skip publication for dry-run, `no-push`,
+A full wrap-up commits/pushes only bounded approved repository changes.
+It publishes OACP memory once unless the session project opted out. Skip publication for dry-run, `no-push`,
 `local-only`, narrower scope, or unavailable required authentication.
 
-`oacp memory push` is the sole memory publication path. Never substitute
-manual memory-repository staging, commits, repair, or force push. Handle each
-source repository independently and stage explicit paths only. Exclude
+`agent-memory push --home <resolved-memory-home> --agent codex` is the sole memory
+publication path. Never substitute manual memory-repository staging, commits,
+repair, or force push. Handle each source repository independently and stage explicit paths only. Exclude
 unrelated or pre-existing changes, credentials, private keys, `.env`, local
 settings, generated caches, and live runtime state.
 
@@ -164,6 +210,8 @@ or pushed.
 
 - Keep OACP memory, the current repository, and every sibling repository as
   separate Git scopes.
+- Exact sibling branches/worktrees created by this session are cleanup-only
+  scope unless their publication was separately approved.
 - Default publication is bounded to OACP memory, the current repository, and
   another repository only when this wrap-up created or explicitly approved
   changes there. Other repositories require opt-in.

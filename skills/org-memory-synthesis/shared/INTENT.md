@@ -60,16 +60,16 @@ The skill walks through nine steps in strict order. Steps are runtime-agnostic i
 
 ## Inputs
 
-- `$OACP_HOME/org-memory/` (required) — initialized by `oacp org-memory init`.
+- `$OACP_HOME/org-memory/` (required) — initialized by `agent-memory org init --home "$OACP_HOME"`.
 - `OACP_HOME` env var (optional) — defaults to `$HOME/oacp` (matching the OACP CLI's documented fallback). Runtime SKILL.md files use the same precedence in their Step 1 inline shell.
 
 ## Hard dependency
 
-- **Initialized org-memory tree**. If `$OACP_HOME/org-memory/` is missing, fail with an install hint: `oacp org-memory init`.
+- **Initialized org-memory tree**. If `$OACP_HOME/org-memory/` is missing, fail with an install hint: `agent-memory org init --home "$OACP_HOME"`.
 
 ## Optional integrations
 
-- **`oacp` CLI ≥ 0.4.0** — provides `oacp org-memory init` and event writers used elsewhere in the OACP stack.
+- **[agent-memory-cli](https://github.com/kiloloop/agent-memory)** — provides `agent-memory org init` and the event writer (`agent-memory event write`) used elsewhere in the OACP stack; oacp-cli no longer ships memory commands.
 - **`gh` CLI** — needed for Step 7C stale-status verification on GitHub issue refs.
 
 ## Acceptance criteria

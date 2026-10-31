@@ -29,7 +29,9 @@ Route major Codex model/app/CLI or OACP release migrations, multi-skill
 capability changes, and context-budget audits to `$audit-oacp-skills`. Route a
 changelog summary without guidance-impact analysis to `$codex-changelog`.
 
-Treat audit, review, diagnosis, and report requests as read-only. A numbered
+Treat audit, review, diagnosis, report, and `--dry-run` requests as read-only.
+Under dry run, report proposals without applying edits, committing, publishing,
+writing memory, or writing pass markers. A numbered
 approval authorizes only its listed local edits. Commit, push, PR, merge,
 messaging, and other external writes remain separate unless explicitly listed.
 
@@ -49,14 +51,17 @@ Classify each target before proposing edits:
   runtime automatically.
 
 Generated Codex memory under `${CODEX_HOME:-$HOME/.codex}/memories/` is
-generated state, not hand-maintained project memory. Do not hand-edit or apply
+generated state, not hand-maintained project memory, including other
+runtime-declared generated memory directories. Do not hand-edit or apply
 line-budget trimming to it. Inspect configuration through an explicit key
 allowlist and redact tokens, credentials, environment values, and private
 endpoints. Never broadly search credential-adjacent config or session trees.
 
 Load only the applicable section of
 [references/audit-checks.md](references/audit-checks.md) for detailed skill,
-curated-memory, or AGENTS/config checks.
+curated-memory, or AGENTS/config checks. The public package keeps these
+direct checks in one installed reference; private source-file layout is not
+a runtime dependency.
 
 ## 2. Prove effective state
 
@@ -151,6 +156,8 @@ solely because it is old.
 Acquire before the first edit:
 
 ```bash
+: "${OACP_ROOT:?resolve the project's explicit OACP memory home first}"
+: "${PROJECT:?resolve the OACP project from its binding first}"
 LOCK_DIR="$OACP_ROOT/projects/${PROJECT}/.memory-write.lock"
 LOCK_OWNER_FILE="$(mktemp)"
 python3 - "$LOCK_OWNER_FILE" <<'PY'

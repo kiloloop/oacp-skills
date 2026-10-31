@@ -8,7 +8,7 @@ Teaches a runtime how to operate within the [Open Agent Coordination Protocol](h
 
 ## Prerequisites
 
-- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.4.2 — install with `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables message signing + verification)
+- [OACP CLI](https://github.com/kiloloop/oacp) >= 0.5.3 — install with `pip install 'oacp-cli[crypto]'` (the `[crypto]` extra enables message signing + verification)
 - An OACP workspace initialized with `oacp init <project>`
 - A `.oacp` project marker in the repo root (created by `oacp setup <runtime> --project <project>`)
 
@@ -50,7 +50,8 @@ The skill auto-triggers based on its description whenever you work with OACP —
 - Workspace layout (`$OACP_HOME`, `.oacp` marker, agent inboxes)
 - The full `oacp send` recipe and which `--type` to pick
 - `oacp inbox` vs `oacp watch` — one-shot vs event-driven
+- Message signing and trust — `oacp trust keygen` / `import`, `oacp send --sign`, `oacp verify`, and the receiver's `verify_mode`
 - Review-loop dispatch (Author → Reviewer direct, not coordinator-mediated)
-- `oacp doctor`, `oacp validate`, `oacp write-event` — supporting commands
+- `oacp doctor`, `oacp validate` — supporting commands
 
 See `SKILL.md` for the Claude Code-native instructions and `shared/INTENT.md` for runtime-agnostic protocol concepts.

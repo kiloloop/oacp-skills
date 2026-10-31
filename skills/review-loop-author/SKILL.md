@@ -1,528 +1,583 @@
 ---
 name: review-loop-author
-description: Run the author side of the review loop — address findings and drive to LGTM. Single-pass by default (exits after sending messages); use --poll for in-session polling. Hybrid split — leader handles Bash I/O, subagent does code fixes only.
+description: Run the author side of the OACP review loop — request exact-head review, address verified findings, and drive to LGTM. Single-pass (exits after sending round messages; /check-inbox re-invokes it on the reviewer's reply). The leader session owns all protocol state and side effects.
 ---
 
 # /review-loop-author — Author-Side Review Loop
 
-Hybrid architecture: the **leader** handles all Bash I/O (inbox, git, gh, polling), spawns a **fix-only subagent** (Read/Edit/Write — no Bash) to address findings, then the **leader** commits, pushes, and sends messages.
+The **leader** (this session) owns all protocol state and side effects: inbox
+I/O, verification, git/gh, message sends, and the final decision each round.
+Code fixes are leader-direct for small fix sets; for larger sets spawn the
+fix-only subagent per [references/fix-subagent-prompt.md](references/fix-subagent-prompt.md).
+Subagents never hold OACP state or perform side effects.
 
-This works around runtime restrictions where the subagent's shell permissions can't be widened to match the leader's — the split keeps state-changing operations on the leader, where runtime permissions are configured.
+Protocol truth lives in the OACP runtime's `docs/protocol/review_loop.md` and
+`dispatch_states.yaml`; they override this skill on conflict.
+
+`SKILL_DIR="${CLAUDE_SKILL_DIR}"` — the directory holding this file and its
+`scripts/` (set it by hand if your runtime does not substitute the variable).
+Snippets here use named variables only: the Skill tool substitutes invocation
+arguments into `$`-digit tokens at render time, so a bare positional in a code
+block silently becomes an argument value.
 
 ## Arguments
 
 ```
-/review-loop-author <PR_NUMBER> --reviewer <name> [--project <name>] [--task-id <id>] [--timeout 15] [--max-rounds 3] [--poll] [--dry-run]
+/review-loop-author <PR_NUMBER> --reviewer <name> [--project <name>] [--task-id <id>] [--max-rounds 2] [--dry-run]
 ```
 
-- `<PR_NUMBER>` — required. The GitHub PR number.
-- `--reviewer <name>` — **required**. Reviewer agent name (no default — caller must be explicit).
-- `--project <name>` — optional. Auto-detected from `.oacp` if omitted.
-- `--task-id <id>` — optional. Enables task-aware message metadata and task-state updates.
-- `--timeout <minutes>` — optional. Poll timeout in minutes (default: 15).
-- `--max-rounds <N>` — optional. Max review rounds before escalation (default: 3).
-- `--dry-run` — optional. Show plan without spawning.
-- `--poll` — optional. Enable in-session polling for reviewer feedback (Step 6). Without this flag, the skill exits after sending messages (single-pass mode for event-driven dispatch via `/check-inbox`).
+- `PR_NUMBER` — required positional.
+- `--reviewer` — required. Exception: when the inbox already holds a verified
+  `review_feedback` (or review-shaped `notification`) for this PR, infer the
+  reviewer from its `from:` field.
+- `--project` — for a new loop, must match the PR repository's OACP binding
+  (Step 1); an existing loop keeps its original project.
+- `--task-id` — optional; enables task-state updates.
+- `--max-rounds` — default **2** (protocol default), maximum 3. A round past
+  the cap needs fresh human direction (Step 10).
+- `--dry-run` — show the plan, change nothing.
 
 ## Instructions
 
-When the user runs `/review-loop-author`, do the following:
+### 1. Gather context and check preconditions
 
-### 1. Parse arguments
-
-Extract from the user's command:
-
-- `PR_NUMBER` — required, first positional arg. Error if missing.
-- `REVIEWER` — required `--reviewer` flag. **Error if missing** with message: "Missing required --reviewer flag. Usage: /review-loop-author <PR> --reviewer <name>"
-- `PROJECT` — optional `--project` flag (auto-detected in step 2 if omitted)
-- `TASK_ID` — optional `--task-id` flag (default empty)
-- `TIMEOUT` — optional `--timeout` flag, default `15`
-- `MAX_ROUNDS` — optional `--max-rounds` flag, default `3`
-- `DRY_RUN` — optional `--dry-run` flag
-- `POLL` — optional `--poll` flag
-
-### 2. Gather context
+For a new loop, resolve the PR's base repository to its OACP project through
+that repository's `.oacp` marker, and confirm the checkout's remote is the PR
+repository — a directory name or the session's current project is not enough.
+Validate any `--project` override against that binding; with no readable
+marker, stop and ask. Run the loop from the owning repository's author session
+so the reviewer's replies reach its own-project watcher. An existing loop keeps
+its original project and conversation for every later round; moving it needs
+an explicit supersede (Step 4), never a duplicate request.
 
 ```bash
-BRANCH=$(git -C <cwd> rev-parse --abbrev-ref HEAD)
-REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || echo "unknown")
-REPO_PATH=$(git -C <cwd> rev-parse --show-toplevel)
-```
-
-Detect project name (if `--project` was not provided):
-
-```bash
-PROJECT=$(python3 -c "import json; print(json.load(open('${REPO_PATH}/.oacp'))['project_name'])" 2>/dev/null || basename "${REPO_PATH}")
-```
-
-Set derived paths:
-
-```bash
+REPO_PATH=$(git rev-parse --show-toplevel)
+BRANCH=$(git -C "$REPO_PATH" rev-parse --abbrev-ref HEAD)
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+BASE=$(gh pr view <PR_NUMBER> --json baseRefName -q .baseRefName)
+# .oacp sits at the MAIN checkout root; in a linked worktree --show-toplevel is the worktree
+MAIN_ROOT=$(dirname "$(git -C "$REPO_PATH" rev-parse --path-format=absolute --git-common-dir)")
+PROJECT=${PROJECT_FLAG:-$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["project_name"])' "$MAIN_ROOT/.oacp")}
 OACP_HOME="${OACP_HOME:-$HOME/oacp}"
 INBOX_DIR="${OACP_HOME}/projects/${PROJECT}/agents/claude/inbox"
 ```
 
-Define the terminal-archival helper here, before any routing — the LGTM-first route (Step 4 → Step 10) never passes through Step 9, so a definition placed later would leave Step 10's invocation undefined in a fresh shell. Every guard fails closed (a failed check returns without moving anything, and the message stays pending in `inbox/`); the `archive/` directory is provisioned by workspace init/migration, never created during message processing:
+Use the GitHub identity the project's instructions require — for example a
+short-lived App token generated inline per command, exported as `GH_TOKEN`
+for `gh`, and injected per push via
+`git -c http.https://github.com/.extraheader=…`, never persisted to a file or
+the remote URL.
+
+**Receiver routing:** send a new loop's `review_request` to the reviewer
+registered in the PR repository's project workspace. Confirm the sender and
+reviewer are both registered there and that each has pinned the other's key —
+an inbox directory alone is not readiness evidence. Missing, ambiguous, or
+stale registration holds the send for setup; never fall back to another
+workspace because its reviewer is easier to reach. Registration and delivery
+do not admit the review — the reviewer's autonomy gate does.
+
+Verify, report failures, and stop on: PR exists; current branch is the PR head
+branch; PR is `MERGEABLE` (if `CONFLICTING`, rebase onto the base branch and
+`git push --force-with-lease --force-if-includes` **before** requesting review
+— a post-review force-push dismisses the approval and wastes a round);
+`INBOX_DIR` and the reviewer's inbox exist; `oacp send --help` works;
+`gh auth status` passes. A missing inbox in an existing workspace means that
+agent was never registered there: `oacp agent add <project> <agent> --runtime
+<runtime>`, then exchange keys (`oacp trust import`) before the first send.
+
+### 2. Scan the inbox (verified intake)
 
 ```bash
-oacp_archive() {  # oacp_archive <inbox_dir> <filename> <accepted_sha256>
-  local d="$1" f="$2" want="$3" live arch
-  [ -d "$d/archive" ] && [ ! -L "$d/archive" ] \
-    || { echo "RETAINED: archive/ missing or symlinked — provision via workspace migration"; return 1; }
-  [ -f "$d/$f" ] && [ ! -L "$d/$f" ] \
-    || { echo "RETAINED: source missing or not a regular file"; return 1; }
-  live=$(shasum -a 256 "$d/$f" | awk '{print $1}') \
-    || { echo "RETAINED: digest read failed"; return 1; }
-  [ "$live" = "$want" ] \
-    || { echo "RETAINED: digest drift — re-verify before any further processing"; return 1; }
-  [ ! -e "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] \
-    || { echo "RETAINED: destination exists — never overwrite history"; return 1; }
-  mv -n "$d/$f" "$d/archive/$f" \
-    || { echo "RETAINED: move failed"; return 1; }
-  [ ! -e "$d/$f" ] && [ ! -L "$d/$f" ] \
-    || { echo "ERROR: source path still present after move (skipped move or concurrent re-creation) — inspect before retry"; return 1; }
-  arch=$(shasum -a 256 "$d/archive/$f" 2>/dev/null | awk '{print $1}')
-  [ -f "$d/archive/$f" ] && [ ! -L "$d/archive/$f" ] && [ "$arch" = "$want" ] \
-    || { echo "ERROR: archived copy missing or digest mismatch — inspect before retry"; return 1; }
-  echo "ARCHIVED: $d/archive/$f"
-}
+command ls -1 "$INBOX_DIR" | command grep '\.yaml$'      # candidates; archive/ is a subdir
+SNAP="$(mktemp)"; cp "$INBOX_DIR/<file>" "$SNAP"         # immutable snapshot, read once
+ACCEPTED_SHA=$(shasum -a 256 "$SNAP" | cut -d' ' -f1)
+oacp verify "$SNAP" --project "$PROJECT" --receiver claude --oacp-dir "$OACP_HOME" --json
 ```
 
-The post-move source check requires both `! -e` and `! -L` — a concurrent actor re-creating the original inbox pathname as a dangling symlink passes a bare `! -e` test, and reporting success then would leave an untrusted pathname behind a claimed-clean archival.
+Candidates are messages from the reviewer with `related_pr` equal to this PR.
+**Verified-intake rule** (every inbound read in this skill): verify and parse
+only the snapshot; the live file is compared against `ACCEPTED_SHA` only at
+archival, which the archival script does. Shell variables do not persist
+between Bash calls — carry the literal `SNAP` path and `ACCEPTED_SHA` forward.
+Process a message only when `oacp verify` reports `signed-verified` (JSON
+`status: verified`), under any verify posture. Any other outcome — unsigned,
+unverifiable, `signed-INVALID` — means do NOT process and do NOT archive: keep
+the evidence (`--quarantine` copies an INVALID message to `dead_letter/`) and
+surface it to the user.
 
-### 3. Check preconditions
+Route by type: `review_lgtm` → Step 8. `review_feedback` (or a review-shaped
+`notification` — see [references/terminal-checkpoints.md](references/terminal-checkpoints.md))
+→ Step 6. Nothing → Step 3.
 
-Verify all of the following. Report failures and stop:
+Also check GitHub for out-of-band feedback (issue comments, review comments,
+reviews via `gh api`); note anything actionable that is not in the inbox.
 
-- PR exists: `gh pr view <PR_NUMBER> --repo <REPO>` succeeds
-- Current branch matches the PR's head branch
-- **PR is mergeable**: `gh pr view <PR_NUMBER> --repo <REPO> --json mergeable` must show `MERGEABLE`, not `CONFLICTING`. If conflicting, rebase onto latest base branch (`git fetch origin main && git rebase origin/main`), resolve conflicts, and force-push (`git push --force-with-lease`) **before** requesting review. A post-review force-push dismisses the reviewer's approval and wastes a review cycle.
-- Inbox directory exists: `${INBOX_DIR}`
-- `oacp send` is available: `oacp send --help` succeeds
-- gh is authenticated: `gh auth status` succeeds
+### 3. Show plan
 
-### 4. Check for existing feedback (leader pre-scan)
+Print PR, repo, branch, reviewer, project, task id, round, max rounds, inbox
+path. If `--dry-run`, stop here.
 
-Before sending a review request, check if the reviewer has already submitted feedback:
+### 4. Send review_request
+
+Idempotency first: if your outbox or the reviewer's inbox already holds a
+`review_request` for this PR+round, skip the send.
 
 ```bash
-command ls -1 "${INBOX_DIR}/" 2>/dev/null | command grep '\.yaml$'
+REQUESTED_HEAD=$(git -C "$REPO_PATH" rev-parse HEAD)   # full SHA, verbatim; must equal the pushed PR head
+git -C "$REPO_PATH" diff --histogram --shortstat "origin/$BASE...$BRANCH"
+CONV_ID="conv-$(date -u +%Y%m%d)-claude-<PR_NUMBER>"   # schema: conv-<YYYYMMDD>-<agent>-<seq>
 ```
 
-Look for YAML files where `from` matches `<REVIEWER>` and `related_pr` matches `<PR_NUMBER>`. Read matching files with the Read tool.
-
-- If `review_lgtm` found → skip to Step 10 (handle LGTM)
-- If `review_feedback` found → skip to Step 7 (parse feedback)
-- If nothing found → proceed to Step 5
-
-Also check GitHub for out-of-band feedback:
-
-```bash
-gh api repos/<REPO>/issues/<PR_NUMBER>/comments --jq '.[].body' 2>/dev/null
-gh api repos/<REPO>/pulls/<PR_NUMBER>/comments --jq '.[].body' 2>/dev/null
-gh api repos/<REPO>/pulls/<PR_NUMBER>/reviews --jq '.[] | "\(.state): \(.body)"' 2>/dev/null
-```
-
-If GitHub shows new actionable feedback not in inbox, note it for later.
-
-### 5. Show plan and send review request
-
-Display to the user:
-
-```
-Review Loop — Author Side (Hybrid Split)
-  PR:         #<PR_NUMBER> (<REPO>)
-  Branch:     <BRANCH>
-  Reviewer:   <REVIEWER>
-  Project:    <PROJECT>
-  Task ID:    <TASK_ID or empty>
-  Inbox:      <INBOX_DIR>
-  Timeout:    <TIMEOUT> minutes
-  Max rounds: <MAX_ROUNDS>
-```
-
-If `--dry-run`, stop here.
-
-Generate a diff summary:
-
-```bash
-git -C <REPO_PATH> diff main...<BRANCH> --stat
-```
-
-Write a concise 2-4 line summary. Establish the review thread's explicit conversation identity — every message in this loop carries it, and continuation-grant matching (v0.4.3) binds to it. The value is validator-enforced: it must match the protocol schema `conv-<YYYYMMDD>-<agent>-<seq>` (regex `^conv-\d{8}-[A-Za-z0-9._-]{1,64}-\d{1,6}$`) — UTC date, then the originating agent, then a numeric sequence unique to this thread. The PR number is a natural sequence; if a second thread for the same PR starts on the same UTC day, pick a fresh sequence instead of reusing it:
-
-```bash
-CONV_ID="conv-$(date -u +%Y%m%d)-claude-<PR_NUMBER>"
-```
-
-Then send the review request:
-
-```bash
-oacp send <PROJECT> \
-  --from claude --to <REVIEWER> --type review_request \
-  --subject "Review: PR #<PR_NUMBER>" \
-  --conversation-id "${CONV_ID}" \
-  --body "pr: <PR_NUMBER>
-repo: <REPO>
-branch: <BRANCH>
-declared_head: $(git -C <REPO_PATH> rev-parse <BRANCH>)
-diff_summary: |
-  <DIFF_SUMMARY>
-task_id: <TASK_ID>
-round: 1
-review_round: 1" \
-  --related-pr <PR_NUMBER> --priority P1 \
-  --oacp-dir "${OACP_HOME}"
-```
-
-This round-1 message starts the review thread — record its `msg-id` as `ROUND1_REQUEST_MSG_ID`. The continuation evaluator matches same-thread evidence by **equal `conversation_id`** or by a **direct parent equal to the audited round-1 request's msg-id** — it does not traverse a chain of parents, and `--in-reply-to` cannot inherit a conversation from a message that has already been archived out of the live inbox. The explicit `--conversation-id` on every loop message is therefore the load-bearing thread identity; `--in-reply-to` is kept for logical reply threading. `repo` and the canonical `round` field are required for fail-closed grant matching; `review_round` is kept as a legacy alias.
-
-`declared_head` is advisory context for the reviewer (they bind their verdict to the live ref they fetch, not to your declaration) — take it verbatim from `rev-parse`, never hand-typed.
-
-Post a PR comment for human visibility (status only — no diff details):
-
-```bash
-COMMENT_FILE="$(mktemp)"
-cat > "${COMMENT_FILE}" <<EOF
-**Review requested** - claude -> <REVIEWER>
-
-Round: 1
-Scope: PR #<PR_NUMBER>
-Details delivered via inbox review_request message.
-EOF
-gh pr comment <PR_NUMBER> --repo <REPO> --body-file "${COMMENT_FILE}"
-rm -f "${COMMENT_FILE}"
-```
-
-Initialize: `current_round = 1`.
-
-### 6. Poll for feedback (leader polling loop)
-
-> **Single-pass mode (default)**: If `--poll` was NOT provided, skip this step entirely. The skill exits after Step 9 (commit/push/send messages). Subsequent invocations — dispatched by `/check-inbox` when `review_feedback` arrives — will detect the feedback in Step 4 and skip directly to Step 7.
-
-If `--poll` was provided, poll the inbox for a response from the reviewer. On each iteration:
-
-```bash
-command ls -1 "${INBOX_DIR}/" 2>/dev/null | command grep '\.yaml$'
-```
-
-Look for YAML files where `from` matches `<REVIEWER>`, `related_pr` matches `<PR_NUMBER>`, and `type` is `review_feedback` or `review_lgtm`. Read matching files with the Read tool.
-
-- **`review_lgtm` found** → Go to Step 10
-- **`review_feedback` found** → Go to Step 7
-- **Nothing found** → Check if elapsed time exceeds `<TIMEOUT>` minutes. If yes → Go to Step 12 (escalation). Otherwise sleep 30 seconds and repeat.
-
-### 7. Parse review feedback (leader reads findings)
-
-From the `review_feedback` message, extract from the body:
-
-- `findings_packet` — path to the findings YAML (relative to project workspace)
-- `round` — current review round number
-- `blocking_count` — number of blocking findings
-- `task_id` — optional task identifier (fallback to `<TASK_ID>`)
-- `review_round` — optional round field (fallback to `round`)
-
-Check: if body contains `escalation: max_rounds_exceeded` → Go to Step 12.
-
-Read the findings packet:
-
-```bash
-cat "${OACP_HOME}/projects/<PROJECT>/<findings_packet>"
-```
-
-Store the full findings YAML content as `FINDINGS_CONTENT`.
-
-**Retain the `review_feedback` message in the inbox for now** — record its filename and accepted SHA (`ACCEPTED_SHA=$(shasum -a 256 "${INBOX_DIR}/<message_filename>" | awk '{print $1}')`). It is archived only in Step 9, after both outbound messages (`review_addressed` and the round-N+1 `review_request`) have been sent successfully — a crash before that leaves it pending for clean re-dispatch. Never plain-`rm` it.
-
-If task_id is available, update task review fields:
-
-- `review_round`: parsed value
-- `review_status`: `needs_changes`
-- `findings_packets`: append path
-
-### 8. Spawn fix subagent (code edits only)
-
-Use the Task tool to spawn a `general-purpose` subagent with `run_in_background: true`. Use model `sonnet`.
-
-**IMPORTANT**: The subagent uses Read, Edit, Write, and Bash (for search only — `command rg`, `command fd`, `command ls`). Do not let it use Bash for git, gh, or anything that writes state — the leader handles commits, pushes, and messages.
-
-The subagent prompt MUST be exactly the template below with variables substituted:
-
-````
-You are the fix subagent for PR #<PR_NUMBER> on repo <REPO>.
-
-Your ONLY job: read the review findings, edit source files to address them, and output a summary of what you did. You receive all findings data pre-gathered.
-
-CRITICAL: Use Read (to examine source files), Edit (to fix code), Write (to create new files if needed), and Bash only for search (`command rg`, `command fd`, `command ls`). Do NOT use Bash for git commits, pushes, gh operations, or sending messages — the leader handles all state changes. (Glob and Grep tools no longer exist on native Claude Code builds since v2.1.117.)
-
-## Context
-
-- PR number: <PR_NUMBER>
-- Branch: <BRANCH>
-- Repo: <REPO>
-- Repo path: <REPO_PATH>
-- Round: <current_round>
-
-## Findings to Address
+Body fields (review_loop.md names; `requested_head` and `review_round` are
+legacy duplicates for older reviewer tooling):
 
 ```yaml
-<FINDINGS_CONTENT>
+pr: <PR_NUMBER>
+repo: <OWNER/REPO>
+branch: <BRANCH>
+round: <N>
+max_rounds: <MAX_ROUNDS>
+declared_head: <REQUESTED_HEAD>
+requested_head: <REQUESTED_HEAD>
+review_round: <N>
+diff_summary: |
+  <2-4 lines>
+task_id: <TASK_ID>
+max_turns_reviewer: 8
+max_runtime_s_reviewer: 600
+side_effects:
+  - writes_findings_packet
+  - sends_oacp_reply
+  - comments_on_github        # status comments; only when intended and permitted
+  - submits_github_review     # GitHub approval; only when needed and permitted
 ```
 
-## Instructions
+The reviewer parses the body with `yaml.safe_load`, and a hand-written scalar
+containing a colon-space or a leading quote breaks it. Build the body as a mapping,
+`yaml.safe_dump(body, sort_keys=False, width=100000)`, assert
+`yaml.safe_load(text) == body`, write it to a temp file, and send:
 
-### Step 1: Prioritize findings
-
-Extract all findings where `status: open`. Sort by priority:
-1. P0 blocking — critical, must fix
-2. P1 blocking — major, must fix
-3. Non-blocking P0/P1 — important but not merge-blockers
-4. P2/P3 — minor issues and nits
-
-### Step 2: Address each finding
-
-For each open finding, in priority order:
-
-1. Read the referenced file using the Read tool
-2. Determine action:
-   - **Fix** — if the finding is valid and the fix is clear, use Edit to apply it
-   - **Push back** — if the finding is incorrect or based on a misunderstanding, note it in your output (the leader will send a question to the reviewer)
-   - **Defer** — if out of scope for this PR, note it in your output
-3. If fixing: use the Edit tool to modify the file. Make minimal, focused changes that address the finding without introducing new issues.
-
-### Step 3: Output fix summary
-
-As the LAST part of your output, print a structured summary block exactly like this:
-
-```
----FIX_SUMMARY---
-fixed:
-  - id: "F-001"
-    description: "<what was changed>"
-    files: ["<path/to/file>"]
-  - id: "F-003"
-    description: "<what was changed>"
-    files: ["<path/to/file>"]
-deferred:
-  - id: "F-002"
-    reason: "<why deferred>"
-pushed_back:
-  - id: "F-004"
-    reason: "<why this finding is incorrect>"
-files_modified:
-  - "<path/to/file1>"
-  - "<path/to/file2>"
----END_FIX_SUMMARY---
+```bash
+oacp send "$PROJECT" \
+  --from claude --to <REVIEWER> --type review_request \
+  --subject "Review: PR #<PR_NUMBER> (round <N>)" \
+  --conversation-id "$CONV_ID" --body-file "$BODY_FILE" \
+  --related-pr <PR_NUMBER> --priority P1 --oacp-dir "$OACP_HOME"
 ```
 
-This block is parsed by the leader. Do not deviate from the format. If there are no deferred or pushed_back items, use empty lists.
-````
+This contract applies to every `review_request` you send as author, from any
+flow — task dispatch, inline continuation rounds, batched sibling PRs. Re-read
+this step before composing one, and after any context compaction; the
+`side_effects:` block and the verbatim heads are the parts that drop.
 
-### 9. Commit, push, and send review_addressed (leader post-process)
+- **Heads**: both head fields carry the same verbatim `rev-parse` output. They
+  are context for the reviewer, never evidence — the reviewer binds its
+  verdict to the live head it fetches.
+- **Thread identity**: `CONV_ID` must match
+  `^conv-\d{8}-[A-Za-z0-9._-]{1,64}-\d{1,6}$` (UTC date; the PR number is a
+  natural sequence when it has six digits or fewer — pick a fresh sequence for
+  a second thread on the same PR and day). Carry it verbatim on EVERY loop
+  message: continuation-grant evidence matches an equal `conversation_id` or
+  an immediate parent only (no chain traversal), and an archived message
+  cannot donate a conversation to `--in-reply-to` — thread to one with
+  explicit `--parent-message-id` + `--conversation-id`.
+- **Grants**: the receiver's continuation gate reads only `round` and
+  `side_effects`; `repo` is required on granted rounds so the reviewer can
+  validate the thread's repository and PR.
+- **Side effects**: declare the round's GitHub actions on every request that
+  expects one. Omission declares only the defaults (findings packet + OACP
+  reply), and the reviewer withholds anything undeclared — on a
+  ruleset-protected repository a withheld `submits_github_review` blocks the
+  merge and costs a round-trip. On a grant-governed thread declare only what
+  the grant permits; an expanding declaration pauses the round
+  (`continuation_grant_scope_exceeded`).
 
-After the subagent completes:
+**Superseding a request** (review_loop.md → Superseding a Request):
 
-0. **Authenticate for git/gh operations**. If the repo requires GitHub App auth (e.g., to attribute commits to a bot identity), generate and use the short-lived app token exactly as that repo specifies. Export `GH_TOKEN` for `gh` commands and inject auth per-command via `http.<host>.extraheader` for `git push` — never persist the token in the remote URL. Fall back to verified human auth only after a concrete app failure. Example pattern:
+- **Defective request already sent**: send a contract-complete replacement
+  with `supersedes_message_id: <defective id>` and `supersede_reason:` ("same
+  ask, same head" when only the body was wrong), `--in-reply-to` the defective
+  message, same `--conversation-id`. The reviewer acts on the replacement only
+  and closes the original. Never leave two live requests for one round, or
+  re-send without the marker.
+- **Head change before the reviewer starts — no round cost**: before pushing
+  over an in-flight request, check the reviewer's
+  `agents/<reviewer>/audit/autonomy_decisions/` for a record naming the
+  request's id, and its `status.yaml` `current_task`. Both empty → no head is
+  materialized: push, then send the replacement at the NEW head with
+  `supersede_reason` naming the old head void.
+- **Head change after the reviewer started, before any verdict**: announce
+  first. (1) Before any push, a `notification` threaded on the request —
+  "author pause: declared_head `<sha>` will be replaced, stop at that head" —
+  naming the human direction behind it; (2) do the work locally, one push;
+  (3) the replacement at the new head at the same `round: <N>` — a fresh
+  admission, not a continuation of the cancelled round, which produced no
+  verdict and consumes nothing — with `supersede_reason` (old head void, what
+  changed), `human_direction:` when a human asked for the scope change, and
+  what is new since the superseded request so the reviewer can reuse its
+  partial work. A verdict that lands before your push is round-N
+  output: process it, and the replacement becomes round N+1.
 
-   ```bash
-   git remote set-url origin https://github.com/<ORG>/<REPO>.git
-   AUTH=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
-   git -c http.https://github.com/.extraheader="AUTHORIZATION: basic ${AUTH}" \
-     push https://github.com/<ORG>/<REPO>.git <branch>
-   ```
+**Pre-request checks, every round:**
 
-1. **Parse the fix summary** from the subagent's output. Look for the `---FIX_SUMMARY---` block and extract `fixed`, `deferred`, `pushed_back`, `files_modified`.
+- **Round 1 declares the artifact's class and threat model** in the body
+  (`artifact_class:` plus what it defends against). Authorization, evidence,
+  and transaction machinery earns invariant-maximal closure — and where that
+  bar is "every X is collected" over a finite grammar, the enumerated grammar
+  is the round-1 bar (Step 7). Diagnostics, docs, and convenience surfaces do
+  not, so out-of-model hardening findings can be answered as advisory.
+  Undeclared, the reviewer discovers the bar one adjacent gap per round.
+- **Size the reviewable surface before asking.** Count the diff minus
+  fixtures, lockfiles, snapshots, and generated payloads: ~100 such lines
+  review well, ~1,000 do not. Above a few hundred, split before requesting or
+  say in the body why it must land whole — a split now is free; after
+  `max_rounds_exceeded` it costs the loop. Every size figure in the request is
+  pasted from the output of
+  `bash "$SKILL_DIR/scripts/diff_sizes.sh" "$REPO_PATH" <base> <head>` run at
+  the declared head — its per-file `--histogram --numstat` rows and
+  `--shortstat` totals. Build the body from that output: a figure estimated,
+  summed by hand from the rows, or retyped from an earlier round's body is an
+  estimate. For a lockfile, add a semantic compare of its package map
+  (removed / added / changed counts) — paste the output of
+  `python3 "$SKILL_DIR/scripts/lockfile_compare.py" --repo <dir> --base main --head <branch> [--path package-lock.json]`
+  (`pnpm-lock.yaml` by default); a line diff turns a removed subtree into
+  alignment noise.
+- **A gap you noticed and deferred is a round-1 blocker when it sits inside
+  the declared grammar.** Sweep your design notes for anything waved off as
+  "another module's business" or "not this leg" — a predicate the code trusts
+  but did not close, a check delegated to a user-editable file — and fix it or
+  name it out of model. The same holds for a caveat written for a later leg
+  when the current leg's code already relies on its negation.
+- **When the artifact caches or mirrors an external tool's verdicts,
+  enumerate the tool's inputs from its source** (what the verdict path opens),
+  not from the arguments you pass, and put every input in the key or name it
+  out of model. Every input that moves the key must also be in the
+  change-detection path, or the cached verdict stays stale until an unrelated
+  event. The tool's answer vocabulary gets the same treatment: one value can
+  fold several states, so enumerate what each answer is emitted for before
+  mapping it to a trusted display. Two verbs of one tool are two sources —
+  know which one does the fresh work, never let the stale verb's headline
+  out-vote the fresh verb's rows, and never read a summary flag as the verdict
+  when warning rows carry the state.
+- **Every cell a test header, PR body, or request names must exist.** Grep
+  each claimed case to the test that establishes it; a design-time header
+  lists intended cells, and the reviewer reads it as coverage. A method
+  sentence ("every launch sets X") is the same class — grep each script for
+  how it sets X.
+- **A scorer, gate, or live check you ship is itself under test — make it FAIL
+  before round 1.** Feed every PASS predicate an empty result and one omitted
+  element: a predicate whose denominator comes from the output it scores
+  cannot fail, and `<=` where coverage is claimed is not a coverage check.
+  Build the expected side from a source independent of the thing scored, and
+  ship the negative controls as executed checks.
+- **The requested head is green in CI before the request goes out** (or the
+  body says CI is pending at that head). A local pass proves your platform
+  only; a red check at the declared head spends the round on a head you will
+  replace. After the push, assert the head with
+  `git ls-remote origin refs/heads/<branch>` before `gh pr checks --watch`:
+  `gh pr view` can report the previous head for some seconds, and a watch
+  chained on it returns the old head's green checks.
+- **Never push while a reviewer round is in flight against the declared
+  head** (outside the supersede paths above). Drift during the round makes the
+  reviewer abort for a fresh round — even with a head-amendment `follow_up`
+  sent ahead — and spends one of `max_rounds`; on stacked PRs a fix on the
+  base branch drifts both. Land everything for round N+1 in one push per
+  branch, immediately before its `review_request`.
+- **Deletion PRs: sweep before requesting.** Grep the whole tree bare (no
+  `--include` filters — they skip `.sh`, templates, YAML) for every deleted
+  basename and every retired target as `make <name>`; recovery hints and
+  template header comments are the hiding spots. Land a word-boundary-anchored
+  regression scan so the class stays closed.
+- **Send when the checks above pass, and on a dispatched leg project the
+  clock first.** A control beyond the list — a second harness, a negative
+  control past the scorer's own — runs after the send or not at all: the
+  reviewer re-verifies independently, and a held request costs their idle
+  wait. When the leg runs under an autonomy admission, its clock runs until
+  the Done reply, so each round is paid from the declared
+  `estimated_minutes`: elapsed since work start + the round's wait
+  (`max_runtime_s_reviewer`) + close-out (merge, bookkeeping, Done). Over the
+  declaration → ask the human for a budget now, before the breach
+  (check-inbox → `references/autonomy.md` §E, prospective clear), not after
+  Done is composed, when the terminal finalize checkpoints and the reply
+  waits on a human clear. When no human is reachable, do not hold the round
+  on the ask — proceed, say in the status message that the clock will
+  breach, and take the terminal-time checkpoint at the finalize.
 
-2. **Review changes** — run `git diff` in the repo to confirm the edits look correct.
+For round > 1 add `--in-reply-to <id of the reviewer's last message>` — take
+the id from the message's `id:` field, **never** from the filename hash — and
+keep `--conversation-id "$CONV_ID"` (parenting directly to the round-1 request
+id is the alternative only when no conversation id was established).
 
-3. **Stage and commit** the modified files:
+**Every round, round 1 included**: post the status-only "Review requested" PR
+comment (template in
+[references/terminal-checkpoints.md](references/terminal-checkpoints.md)) — it
+is the only trace of the round on the PR itself. After the send, confirm the
+delivered copy exists at the `inbox:` path `oacp send` printed, then verify it
+against the reviewer's pins (`oacp verify <that path> --project "$PROJECT"
+--receiver <REVIEWER>`): `signed-unknown-kid` means the reviewer has not
+pinned your key and will reject the request at intake —
+tell them now, threaded, instead of losing the round to it. Exit here.
 
-   ```bash
-   cd <REPO_PATH>
-   git add <files_modified>
-   git commit -m "$(cat <<'EOF'
-   Address review findings (round <current_round>)
+### 5. Wait for the reply — never in-session
 
-   <list of F-xxx: brief description for each fixed finding>
+The inbox watcher (`oacp watch` under a Monitor, dispatching `/check-inbox`)
+starts the next invocation when the reviewer's message lands: `review_lgtm` →
+Step 8; `review_feedback` → Step 6. Re-scanning the inbox inside model turns
+violates review_loop.md → Shell-Only Polling Rule; a stale round is the
+human's call to escalate (Step 10).
 
-   Co-Authored-By: Claude <noreply@anthropic.com>
-   EOF
-   )"
-   ```
+### 6. Parse verified feedback
 
-4. **Push**:
+From the verified `review_feedback` snapshot: `findings_packet`, `round`,
+`blocking_count`, `validated_head`, and the message `id` and
+`conversation_id` (for threading); optional `task_id`/`review_round`.
 
-   ```bash
-   git push origin <BRANCH>
-   ```
+- `escalation: max_rounds_exceeded` or `reviewer_budget_exceeded` → Step 10.
+- Read the packet at `${OACP_HOME}/projects/${PROJECT}/<findings_packet>` as
+  `FINDINGS_CONTENT`.
+- **Leave the feedback message in the inbox**, keeping its Step 2
+  `ACCEPTED_SHA`. It is archived in Step 7 only after BOTH outbound sends
+  (`review_addressed` + the round-N+1 `review_request`) succeed, so a crash
+  re-dispatches cleanly.
+- If a task id is present: set `review_round`, `review_status:
+  needs_changes`, and append the packet path to `findings_packets`.
 
-5. **(Optional)** If `eval_fix.py` is available locally, run a quick heuristic check on the findings packet. If any findings are "unaddressed", investigate.
+### 7. Address findings
 
-6. **Handle push-backs** — if the subagent flagged any findings as `pushed_back`, send a question to the reviewer for each:
+**Leader-direct** (default for ≤2 findings, doc-only fixes, or fixes already
+verified while processing): read, edit, done. **Subagent** (larger sets):
+spawn per [references/fix-subagent-prompt.md](references/fix-subagent-prompt.md),
+then parse its `FIX_SUMMARY` block and review the actual diff.
 
-   ```bash
-   oacp send <PROJECT> \
-     --from claude --to <REVIEWER> --type question \
-     --subject "Question re: <finding_id> (#<PR_NUMBER>)" \
-     --body "<push_back_reason>" \
-     --related-pr <PR_NUMBER> --priority P2 \
-     --oacp-dir "${OACP_HOME}"
-   ```
+Before replying, **replay the reviewer's validation suite** at your head:
+rerun the packet's `qa_validation.commands_run` (retarget pinned checkout
+paths to your tree, and hardcoded temp dirs to one your sandbox permits — a
+denied `mkdtemp` kills the probe before it proves anything) and fix what
+fails. A repro probe encodes the defect, so after the fix it may throw at the
+line that assumed the defect happened — that throw is the pass: wrap that
+read, keep the assertion, and say so in `review_addressed` rather than
+silently editing the probe's claim. Name any proactively fixed, unfiled probe
+in `review_addressed`. A booted-app or render check may stay un-rerun only
+when the fix's files sit outside the bundle's import graph — grep the
+importers and say so.
 
-7. **Build changes summary** from the fixed/deferred/pushed_back lists.
+**Adversarially probe your own fix before sending `review_addressed`.** Probe
+a library the way the fix configures it — the same options, callbacks, and
+predicates the app passes — never bare. When you author both implementation
+and tests, the tests encode your blind spot: reproduce every filed finding
+first, then probe past the filed set with cases chosen to break the fix; the
+reviewer's cases are a sample, not the class. When the fix is executable copy
+(a command recipe in a page, README, or doc), run the text as rendered —
+extract the command lines from the build output and run them under zsh and
+bash with their variables unset; a hand-substituted equivalent tests your
+paraphrase, not the page.
 
-8. **Send review_addressed**:
+**Close the class, not the row.** When a finding is one instance of a finite
+grammar (shell redirect operators, an option table, a long-option
+abbreviation rule), the fix round enumerates the whole grammar in tests
+instead of fixing the filed row plus a hand-picked neighbour — every
+un-enumerated round loses to the next neighbour. When the grammar has two
+strip passes or two operator classes, enumerate their compositions, not each
+class alone: a command grammar closed for keywords and for wrappers
+separately still let `time ! git commit` through, because the keyword strip
+ran once, before the wrapper strip exposed the `!`. If a fix moves an internal
+call path the reviewer's probes monkeypatch, name the new patch target in
+`review_addressed`. When the fix adds a lock, say that too: a probe that nests
+a second invocation in the same thread now blocks on it (`flock` is not
+reentrant), so run their probe retargeted — the overlap on a thread or a
+second process — before the reply, never as written.
 
-   ```bash
-   oacp send <PROJECT> \
-     --from claude --to <REVIEWER> --type review_addressed \
-     --subject "Feedback addressed: round <current_round> (#<PR_NUMBER>)" \
-     --conversation-id "${CONV_ID}" \
-     --in-reply-to <FEEDBACK_MSG_ID> \
-     --body "commit_sha: <LATEST_COMMIT_SHA>
+**Measure a convention finding against the whole file before fixing it.** A
+reviewer sees the diff; complying with "your changed lines deviate from the
+documented contract" can make the changed lines the only ones that follow it.
+Run a comparator over every row first: if the untouched rows share your
+deviation, the documentation is the defect — correct it and push back with
+the counts instead of normalizing a few rows.
+
+**Check the aggregate before composing any fix round.** A blocking count flat
+across two consecutive rounds, or a cumulative fix delta (`git diff
+<round-1-head> --shortstat`) rivaling the original change, means the loop is
+inflating the artifact rather than converging — raise the scope question to
+the human ("is this the right depth?") instead of pushing the fix.
+
+**On a dispatched task, recount the files between the commit and the push
+below.** An envelope hook cannot count files a scratchpad script writes, so
+the recount is the guard — and it runs after the commit, because a
+`<base>...HEAD` range compares commits only and misses the fix it is about to
+add:
+
+```bash
+git -C "$REPO_PATH" diff --name-only <base>...HEAD | sort -u | wc -l   # after the commit, before the push; every PR and repo of the task, vs the dispatch's expected_files_touched
+```
+
+A fix round that crosses the declared count is the check-inbox §E
+checkpoint: record it and get the in-session clear BEFORE the push, not at
+the terminal finalize, where the Done then waits on the human.
+
+Then commit and push:
+
+```bash
+git -C "$REPO_PATH" add <files_modified>        # explicit paths, never -A
+git -C "$REPO_PATH" commit -m "Address review findings (round <N>)
+
+<F-xxx: one line each>
+
+<your runtime's attribution trailer, verbatim>"
+git -C "$REPO_PATH" push origin "$BRANCH"        # auth per Step 1
+NEW_HEAD=$(git -C "$REPO_PATH" rev-parse HEAD)
+```
+
+Send replies, each with `--conversation-id "$CONV_ID"` and `--in-reply-to
+<feedback message id>`, bodies built as in Step 4:
+
+1. Per pushed-back finding: a `question` carrying the reason.
+2. `review_addressed` (idempotency check first), subject `Feedback addressed:
+   round <N> (#<PR_NUMBER>)`:
+
+   ```yaml
+   commit_sha: <NEW_HEAD>
+   validated_head: <NEW_HEAD>
+   round: <N>                 # the round whose feedback this addresses
    changes_summary: |
-     <CHANGES_SUMMARY>
-   round: <current_round>
+     <fixed / deferred / pushed-back summary>
+   touched_files:
+     - <each modified file>
+   addressed_finding_ids:
+     - <each fixed F-id>
    task_id: <TASK_ID>
-   review_round: <current_round>" \
-     --related-pr <PR_NUMBER> --priority P1 \
-     --oacp-dir "${OACP_HOME}"
+   review_round: <N>
    ```
 
-9. **Post PR comment** for human visibility (status only — no changes details):
+3. A fresh round-N+1 `review_request` (Step 4 contract at `NEW_HEAD`,
+   `side_effects:` included).
+4. Status-only PR comments: "Feedback addressed (round N)" for this round,
+   then the "Review requested" comment the round-N+1 request takes under
+   Step 4's every-round rule — templates in
+   [references/terminal-checkpoints.md](references/terminal-checkpoints.md).
+5. **Now** archive the feedback message with the terminal archival helper
+   (below) against `ACCEPTED_SHA`. If the next round would exceed
+   `MAX_ROUNDS`, the next feedback escalates (Step 10). Exit; the watcher
+   re-dispatches on the reply.
 
-   ```bash
-   COMMENT_FILE="$(mktemp)"
-   cat > "${COMMENT_FILE}" <<EOF
-   **Feedback addressed (round <current_round>)** - claude
+### 8. Handle LGTM
 
-   Status: updates pushed for re-review.
-   Details delivered via inbox review_addressed message.
-   EOF
-   GH_TOKEN="${TOKEN}" gh pr comment <PR_NUMBER> --repo <REPO> --body-file "${COMMENT_FILE}"
-   rm -f "${COMMENT_FILE}"
-   ```
+Full checkpoint in
+[references/terminal-checkpoints.md](references/terminal-checkpoints.md):
+`quality_gate_result: pass` + `merge_ready: true`; **compare `validated_head`
+to the live PR head** (mismatch = stale LGTM — request a fresh round instead);
+read `withheld_side_effects`; adopt structured `nits`; update task fields; PR
+comment; archive the message after bookkeeping (`ACCEPTED_SHA` captured at
+read time, terminal archival helper). Do NOT merge here. Then Step 9 and
+report `STATUS: PASSED`.
 
-10. **Send review_request for round N+1**: Send a new `review_request` to trigger re-review:
+**Exception — a dispatched task whose admission approved `merges_pr`** (the
+task profile declares it and the human's approval covered it): the author
+merges right after this checkpoint, still bound to the validated head —
+`gh pr merge <N> --repo <owner/repo> --squash --match-head-commit
+<validated_head>`, from a cwd outside any worktree that has the branch
+checked out, without `--delete-branch` — then the dispatch's close-out (Done
+reply, terminal finalize, archive). An LGTM outside such an admission still
+ends at Step 9 with the merge left to the human.
 
-    ```bash
-    oacp send <PROJECT> \
-      --from claude --to <REVIEWER> --type review_request \
-      --subject "Re-review: PR #<PR_NUMBER> (round <current_round + 1>)" \
-      --conversation-id "${CONV_ID}" \
-      --in-reply-to <FEEDBACK_MSG_ID> \
-      --body "pr: <PR_NUMBER>
-    repo: <REPO>
-    branch: <BRANCH>
-    declared_head: <LATEST_COMMIT_SHA>
-    diff_summary: |
-      Addressed round <current_round> feedback. See review_addressed message for details.
-    task_id: <TASK_ID>
-    round: <current_round + 1>
-    review_round: <current_round + 1>" \
-      --related-pr <PR_NUMBER> --priority P1 \
-      --oacp-dir "${OACP_HOME}"
-    ```
+**A post-LGTM commit trades the approval — so a nit fix is a decision, not a
+courtesy.** On a ruleset-protected repository, a push after the approval
+dismisses the review and the PR needs another round to become mergeable.
+Default: do not push a nit fix after LGTM — adopt the nit per the LGTM
+checkpoint in
+[references/terminal-checkpoints.md](references/terminal-checkpoints.md),
+which owns where it lives (including the `files_issues` bound on a dispatched
+task), and say so in the terminal report. Push it only when it is blocking,
+when the reviewer is live and will re-approve in the same round, or when the
+human says to — never silently.
 
-    `--conversation-id "${CONV_ID}"` is what reaches the grant audit — the evaluator matches equal `conversation_id` or a direct parent equal to `ROUND1_REQUEST_MSG_ID`, never a traversed parent chain, and the archived feedback message cannot donate a conversation to `--in-reply-to`. (`--in-reply-to <FEEDBACK_MSG_ID>` remains for logical reply threading only; parenting directly to `ROUND1_REQUEST_MSG_ID` is the sanctioned alternative when no explicit conversation id was established.) `repo` and the canonical `round` field are required for fail-closed grant matching — without them a granted round falls back to per-round human confirmation.
+### 9. Clean up
 
-11. **Archive the processed `review_feedback`** now that both outbound messages succeeded — invoke the fail-closed `oacp_archive` helper defined in Step 2 (digest recheck against the accepted snapshot; any failed guard retains the source in `inbox/`):
+Archive remaining processed messages for **this PR only** with the terminal
+archival helper; anything pending, held, or unverified stays in the inbox.
 
-    ```bash
-    oacp_archive "${INBOX_DIR}" "<message_filename>" "$ACCEPTED_SHA"
-    ```
+### 10. Timeout or escalation
 
-12. **Increment round**: `current_round += 1`. Check if `current_round > <MAX_ROUNDS>` → Go to Step 12. If `--poll` was NOT provided → exit (single-pass mode complete). Otherwise return to Step 6 (poll for next feedback).
+**Timeout only — mandatory final drain**: re-run the Step 2 scan one last
+time; a matching response voids the timeout (process it normally, send no
+timeout messaging). Otherwise follow
+[references/terminal-checkpoints.md](references/terminal-checkpoints.md):
+escalation notification to the team lead, status-only PR comment, Step 9,
+then `STATUS: ESCALATED` or `STATUS: TIMEOUT`. After an escalation the loop
+stops pending fresh human direction; a per-round sanction never becomes a
+standing grant unless the human explicitly grants one.
 
-### 10. Handle LGTM (leader)
+**When the human sanctions more rounds**, compose per
+[references/terminal-checkpoints.md → Sanctioned continuation](references/terminal-checkpoints.md):
+`human_direction:` (who, when, scope) + `max_rounds` bumped + explicit
+`--parent-message-id`/`--conversation-id` threading to the archived
+escalating feedback for a per-round sanction; a standing
+continue-until-LGTM grant rides EVERY later round with `max_rounds` at
+current+1 and a named circuit-breaker round. Fix and push BEFORE the sanction
+ask. Passing your own breaker needs an explicit human "continue until merged",
+stated verbatim on both messages, re-armed, and disclosed in the Done reply.
 
-When a `review_lgtm` message is found (from Step 4, 6, or post-round polling):
+**Before putting options in front of the human**, read the organization's
+standing rules for the escalation reason and offer a standing answer as one
+of the options; executing a split or closing the escalation by scope
+reduction follows
+[references/terminal-checkpoints.md → Options, splits, and descoping](references/terminal-checkpoints.md).
 
-1. Verify the message first (oacp-cli v0.4.2+): `oacp verify "<file>" --project "${PROJECT}" --receiver <agent_name> --oacp-dir "${OACP_HOME}"` — under an enforce posture, act only on a `signed-verified` LGTM. Capture its accepted digest for the terminal archival: `ACCEPTED_SHA=$(shasum -a 256 "${INBOX_DIR}/<lgtm_message_filename>" | awk '{print $1}')`. Read the message body. Confirm `quality_gate_result: pass` and that `validated_head` equals the current PR head (full-string match against `git rev-parse`); an LGTM bound to a stale head means the reviewer approved something you have since moved — request a fresh round instead of merging on it. Structured `nits` entries in the body are deferred non-blocking items: track each one (issue, follow-up task, or documented next action) — none may dangle untracked.
-2. Parse optional `task_id` / `review_round` fields.
-3. If task_id is available, update task review fields:
-   - `review_status: approved`
-   - `review_round`: parsed value
-   - `lgtms`: append reviewer if missing
-4. Archive the message with the fail-closed `oacp_archive` helper defined in Step 2 (`ACCEPTED_SHA` captured when the LGTM was read; any failed guard retains the source in `inbox/`):
+## Terminal archival helper
 
-   ```bash
-   oacp_archive "${INBOX_DIR}" "<lgtm_message_filename>" "$ACCEPTED_SHA"
-   ```
+Processed messages are archived, never deleted: a digest-checked, no-clobber
+move of the bare inbox filename to `inbox/archive/` that preserves signed
+evidence:
 
-5. Post PR comment:
+```bash
+bash "$SKILL_DIR/scripts/oacp_archive.sh" "$INBOX_DIR" "<filename>" "$ACCEPTED_SHA"
+```
 
-   ```bash
-   COMMENT_FILE="$(mktemp)"
-   cat > "${COMMENT_FILE}" <<EOF
-   **Review loop complete** - claude
-
-   LGTM received from <REVIEWER>. PR is merge-ready.
-   EOF
-   GH_TOKEN="${TOKEN}" gh pr comment <PR_NUMBER> --repo <REPO> --body-file "${COMMENT_FILE}"
-   rm -f "${COMMENT_FILE}"
-   ```
-
-6. Do NOT merge the PR.
-7. Go to Step 11, then report: `STATUS: PASSED`
-
-### 11. Clean up
-
-Archive (never delete) any remaining fully-processed messages for this PR (matching `related_pr: <PR_NUMBER>`) with the same digest-checked no-clobber move as Step 9. Messages still awaiting a terminal reply, and messages for other PRs, stay in the inbox.
-
-### 12. Handle timeout or escalation
-
-Determine the reason: max rounds exceeded, reviewer escalation, or timeout.
-
-1. Send escalation inbox message to team lead:
-
-   ```bash
-   TEAM_LEAD="${TEAM_LEAD:-team-lead}"
-   oacp send <PROJECT> \
-     --from claude --to "${TEAM_LEAD}" --type notification \
-     --subject "Review escalation: PR #<PR_NUMBER>" \
-     --body "Review loop for PR #<PR_NUMBER> escalated after <current_round> rounds.
-   Reason: <reason>
-   Next steps: Suggest synchronous coordination or human review." \
-     --related-pr <PR_NUMBER> --priority P1 \
-     --oacp-dir "${OACP_HOME}"
-   ```
-
-2. Post a PR comment:
-
-   ```bash
-   COMMENT_FILE="$(mktemp)"
-   cat > "${COMMENT_FILE}" <<EOF
-   **Review loop escalated** - claude
-
-   Reason: <reason>. Manual coordination needed.
-   EOF
-   GH_TOKEN="${TOKEN}" gh pr comment <PR_NUMBER> --repo <REPO> --body-file "${COMMENT_FILE}"
-   rm -f "${COMMENT_FILE}"
-   ```
-
-3. Go to Step 11, then report:
-   - `STATUS: ESCALATED` (if max rounds or reviewer escalation)
-   - `STATUS: TIMEOUT` (if poll timeout exceeded)
+Exit 0 and `ARCHIVED:` only on success; every guard fails closed and exits 1.
+`RETAINED:` means nothing moved and the message stays pending (on digest
+drift, re-verify before any further processing); `ERROR:` means the move ran
+but a post-move check failed — inspect both paths before any retry. The
+`archive/` directory is provisioned by workspace init or migration; never
+create it here.
 
 ## Notes
 
-- The subagent runs with zero Bash calls for state changes — all git/gh/inbox I/O is handled by the leader.
-- Default model is sonnet (sufficient for code fixes).
-- Configure runtime permissions according to local policy; the leader owns all state-changing shell operations.
-- **Idempotent sends**: Before sending `review_request` (Step 5) or `review_addressed` (Step 9) after a crash/restart, check the reviewer's inbox and own outbox for an already-sent message matching this PR+round. Skip the send if a duplicate exists.
-- **Single-pass is the default**: The skill exits after Step 9 (commit/push/send messages). After sending `review_addressed`, it also sends a new `review_request` (round N+1) to trigger re-review via `/check-inbox` dispatch. Use `--poll` to revert to in-session polling (Step 6).
-- With `--poll`, handles multi-round loops (up to max-rounds) autonomously.
-- Can be resumed by running the command again if timeout occurs (with or without `--poll`).
-- The reviewer does not merge — the author (or human) decides when to merge.
-
-## PR Comment Data-Minimization Rule
-
-- PR comments must stay concise and status-oriented.
-- Store rich detail in protocol messages (`review_request`, `review_addressed`) and findings packets, not in PR comments.
-- Never include command output, logs, stack traces, credentials, environment values, or local-only paths in PR comments.
-- Always use `--body-file` with a temp file for PR comments — avoids shell expansion leaking sensitive data to `ps` output.
-
-## Learned from runs
-
-<!-- All prior lessons incorporated into main instructions. Section kept as anchor for future entries. -->
+- **Single-pass, always**: each invocation sends its round messages and
+  exits; `/check-inbox` dispatches the next invocation when the reviewer
+  replies. Resumable by re-running.
+- The reviewer does not merge; the author (or human) merges only with the
+  approval the repository's policy requires, bound to `validated_head`.
+- **PR comment data-minimization**: status-only comments via `--body-file`;
+  no command output, logs, stack traces, credentials, or local paths — detail
+  belongs in protocol messages and findings packets.
+- **A stacked PR dies with its base branch — merge the parent without
+  `--delete-branch`.** `gh pr merge --delete-branch` deletes the parent's ref
+  through the API, GitHub then closes every PR based on it, and `gh pr reopen`
+  is refused once the head is force-pushed. On a repository that deletes
+  merged branches itself, merge the parent without the flag and GitHub
+  retargets the child to the parent's base. On one that does not, run
+  `gh pr edit <child> --base main` before the merge (no head change, no review
+  drift). Either way: record the parent's head before merging, merge, confirm
+  the child is still open on main, then `git fetch origin main` and check that
+  `origin/main` contains the parent's merge commit (`git merge-base
+  --is-ancestor <merge-commit> origin/main`; a stale `origin/main` drops the
+  parent's changes from the restacked child), then `git rebase --onto
+  origin/main <parent-pre-merge-head> <child-branch>`, then — BEFORE the
+  lease-push — run Step 4's reviewer-started check. Not started → push and send a superseding
+  `review_request` at the new head (tree identity stated in
+  `supersede_reason`), at no round cost. Started, no verdict yet → Step 4's
+  author-pause sequence: the threaded pause notice before the push, then the
+  replacement `review_request` at the new head. A `follow_up` cannot re-point
+  a started round — the reviewer stops on the drift and only a fresh request
+  starts a new invocation. Verdict already landed → process it, then push and
+  request round N+1 at the new head. Recovery when the parent already merged:
+  open a successor PR from the same branch onto main ("Supersedes #N", carry
+  its `Closes` lines), comment on the dead PR, and send a fresh round-1
+  `review_request` for the successor; a sanction given for the dead PR does
+  not carry over to it without the human's word. Either way the child's head
+  changes once, so budget that one re-request when a stack is coming — or,
+  when the child need not be reviewed in parallel, open it for visibility and
+  send its round-1 request only after the restack: no re-request, CI at the
+  final head, serial review latency as the cost. When CI runs
+  only on PRs into main, the child gets no checks while it targets the parent
+  branch: its request says CI fires on the retarget and names the local suite
+  run instead.

@@ -107,6 +107,25 @@ def test_body_containing_a_frontmatter_delimiter_round_trips(tmp_path):
     assert fm["content_sha256"] == wd.content_sha256(body)
 
 
+def test_duration_placeholder_is_filled_from_the_stamps_before_hashing(tmp_path):
+    # STARTED -> ENDED is 1h57m36s, which rounds up to 118 minutes.
+    body = b"# Session\n\n**Duration**: ~{{DURATION}} minutes\n\n{{OTHER}} stays.\n"
+    target, _, digest, _ = call(tmp_path, body=body)
+    fm, stored = wd.split_record(target.read_bytes())
+    assert stored == b"# Session\n\n**Duration**: ~118 minutes\n\n{{OTHER}} stays.\n"
+    assert fm["content_sha256"] == wd.content_sha256(stored) == digest
+
+
+@pytest.mark.parametrize(
+    "ended, minutes",
+    [("00:00:00", "0"), ("00:00:01", "1"), ("00:01:00", "1"), ("00:01:01", "2")],
+)
+def test_duration_rounds_partial_minutes_up(ended, minutes):
+    started = wd.parse_utc("started_utc", "2026-08-25T00:00:00Z")
+    stop = wd.parse_utc("ended_utc", f"2026-08-25T{ended}Z")
+    assert wd.fill_placeholders(b"{{DURATION}}", started, stop) == minutes.encode()
+
+
 def test_filename_matches_the_protocol_grammar(tmp_path):
     target, _, _, _ = call(tmp_path)
     grammar = wd.re.compile(

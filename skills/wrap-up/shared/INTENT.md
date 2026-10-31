@@ -1,51 +1,56 @@
 # wrap-up — Shared Intent
 
-## What it does
+## Contract
 
-Sequenced end-of-session hygiene. Composes cleanup, optional debrief, org-memory event capture, self-improve, commit, optional memory snapshot push, and remote push into a single command. Designed to be invoked once at the end of a working session so the agent leaves a clean tree, durable memory, and an up-to-date remote.
+Finish a session with bounded cleanup, durable reporting, a delta-first guidance
+audit, and authorized publication. A clean tree is evidence to inspect, not a
+reason to discard someone else's work or claim unfinished work is complete.
 
-## Workflow
+## Sequence
 
-The skill walks through eight steps in strict order. Steps are runtime-agnostic in intent; runtime-specific instructions live in each runtime's `SKILL.md`.
+1. Preview branches, worktrees and inbox status without writes. Remove only
+   verified, disposable session-owned artifacts. Preserve persistent, peer-owned,
+   dirty or post-merge-diverged work and needed ignored files.
+2. Invoke the installed debrief workflow; report a missing writer or publication
+   failure explicitly and continue independent work. Do not improvise a fallback
+   store or rewrite a landed record.
+3. Capture significant shared outcomes with `agent-memory event write` when
+   authorized; routine narrative stays in the debrief. Honor project opt-outs.
+4. Run the required self-improve skill against the session delta. Reuse matching
+   approval, request genuinely new scope, and avoid reopening settled findings.
+5. Stage explicit approved files in each owning repository. Review the staged
+   diff and keep unrelated or sensitive files out.
+6. Publish authorized memory with `agent-memory push --home <resolved-home>
+   --agent <registered-agent>` when configured. Inspect the whole pending memory
+   diff before the tool commits its allowlist; do not claim it can select files.
+7. Integrate upstream and push each authorized repository under its own policy.
+   Stop on conflicts, unexplained changes or failed checks.
+8. Report completed steps, skips, failures and unresolved work. Independent
+   memory and repository publication failures do not erase one another.
 
-1. **Cleanup** — remove just-merged PR worktrees, delete merged local branches (safe `-d` only), prune stale worktrees, and report (but do not auto-delete) processed inbox messages.
-2. **Debrief (optional)** — invoke `/debrief` if installed; otherwise write to `$CORTEX_HOME` if set; otherwise drop a 20-line summary at `./.oacp/debriefs/YYYY-MM-DD.md`. Failure is non-fatal.
-3. **Org-memory events** — write `event` / `decision` / `rule` entries via `oacp write-event` for outcomes other agents and projects need to know about. Skip silently if org-memory is not initialized.
-4. **Self-improve (hard dependency)** — invoke `/self-improve` (full scope), pause for user approval, apply approved changes. An optional follow-up pass (`/self-improve self-improve`) reviews the self-improve skill itself.
-5. **Commit current repo** — stage explicit files, exclude secrets, commit with a `wrap-up:` prefix.
-6. **OACP memory sync** — `oacp memory push` if the `$OACP_HOME/.oacp-memory-repo` marker is present. Independent of Step 7; failure does not block.
-7. **Pull-rebase + push** — rebase the current branch onto its upstream, then push.
-8. **Summary** — print a structured status block covering each step's outcome.
+## Boundaries
 
-`--dry-run` runs Steps 1–4 (cleanup, debrief, org-memory, self-improve) but skips commits, pushes, and memory sync (Steps 5–7).
+- Branch deletion requires ancestry proof or the exact local tip matching a
+  merged PR head for a squash merge. A merged PR alone cannot authorize deleting
+  later unpublished commits. Optional cleanup helpers remain advisory.
+- Inbox reporting never consumes pending messages. Terminal processing and
+  no-clobber archival belong to the inbox workflow.
+- Codex dry-run performs read-only previews and proposals: no cleanup,
+  debrief/event writes, edits, commits, memory publication or pushes. The current
+  Claude slice retains its local-stage dry-run semantics: cleanup, debrief and
+  self-improve may run (including approved local edits), while commits and
+  pushes are skipped and event writing uses its dry-run option. Unifying these
+  semantics requires a separately scoped Claude-slice change.
+- The active runtime supplies its permission, delegation and scheduler mechanics;
+  this contract does not prescribe a runtime-specific sandbox bypass.
+- Self-improve is a hard dependency. Debrief and memory integrations must report
+  capability gaps and their consequence; no silent fallback to retired commands.
 
-## Inputs
+## Inputs and outputs
 
-- The current repo's working tree (required)
-- `$OACP_HOME` (optional) — defaults to `$HOME/oacp` (matching the OACP CLI's documented fallback). Used for inbox cleanup, org-memory events, and memory sync.
-- `$CORTEX_HOME` (optional) — clone of `kiloloop/cortex` for the debrief target when `/debrief` is not installed.
-- `--dry-run` flag (optional) — preview mode.
+Resolve the workspace and memory home explicitly. `OACP_HOME` defaults to the
+configured OACP home; when memory tooling chooses another home, consistently use
+that resolved home for event writing, inspection and publication.
 
-## Hard dependency
-
-- **`/self-improve` skill** (Step 4) — must be installed in the runtime. If absent, the skill fails with an install hint pointing at `skills/self-improve/` in the same repo.
-
-## Optional integrations
-
-- **`/debrief` skill** — preferred debrief target when installed.
-- **`oacp` CLI ≥ 0.4.0** — required for Step 3 (`oacp write-event`) and Step 6 (`oacp memory push`).
-- **Cloned `kiloloop/cortex`** — set `$CORTEX_HOME` to enable the second-tier debrief target. Public repo: <https://github.com/kiloloop/cortex>.
-
-## Acceptance criteria
-
-- Branch deletion is verification-gated: `git branch -d` for ancestry-merged branches; `-D` only when the branch tip exactly equals a merged PR's head SHA (squash-merge case). Unmerged or diverged branches are never deleted.
-- Never auto-deletes inbox messages — reports them only; user confirms deletion.
-- Never commits `.env`, credentials, secrets, or `settings.json` files.
-- Always pull-rebases before push (Step 7) to avoid conflicts with other runtimes.
-- Debrief failure is non-fatal — Steps 3–8 still run.
-- Org-memory sync (Step 6) is independent of the current-repo push (Step 7) — failure on one does not block the other.
-- The skill never inlines runtime-specific sandbox bypass flags. Runtime permissions and SSH-agent socket access are described in prose and configured in the runtime, not in the skill body.
-
-## Outputs
-
-A summary block printed to the user covering: cleanup counts, debrief target, org-memory event count, self-improve findings/applied, commit SHA, memory-sync SHA (or skip reason), and push status.
+Report cleanup evidence, debrief path/status, event count, self-improve outcomes,
+repository commit/push results, memory publication result and remaining blockers.
