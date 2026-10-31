@@ -40,7 +40,7 @@ Resolve the workspace and helper before reading event bodies:
 ```bash
 OACP_ROOT="${OACP_HOME:-$HOME/oacp}"
 test -d "$OACP_ROOT/org-memory" || {
-  echo "ERROR: org-memory not found. Run: oacp org-memory init" >&2
+  echo "ERROR: org-memory not found. Run: agent-memory org init --home \"$OACP_ROOT\"" >&2
   exit 1
 }
 ```

@@ -8,12 +8,14 @@ description: Capture a structured session summary and publish it to the OACP org
 Publish a structured summary of this session to the central org-memory debrief store:
 
 ```text
-$OACP_HOME/org-memory/debriefs/<project>/<YYYY>/<MM>/<YYYYMMDD>-<agent>-<session>.md
+$MEMORY_HOME/org-memory/debriefs/<project>/<YYYY>/<MM>/<YYYYMMDD>-<agent>-<session>.md
 ```
+
+`MEMORY_HOME` is the memory home resolved in step 1.
 
 One session produces exactly one file, written once at session end and never
 rewritten. The store is the full-fidelity session record; curated outcomes
-reach other agents through `oacp write-event` instead (see "Curation guard"
+reach other agents through `agent-memory event write` instead (see "Curation guard"
 below).
 
 ## Arguments
@@ -21,6 +23,11 @@ below).
 - `/debrief` — generate the summary and publish it
 - `/debrief --dry-run` — generate and display the summary without writing
   anything
+
+The shared writer needs Python 3.9+ and the standard library. Binding status,
+curated events, and store diagnostics use `agent-memory-cli` (0.1.1+ for
+`event write`); report a missing capability before that operation. The writer
+itself has no OACP CLI dependency.
 
 ## Instructions
 
@@ -41,8 +48,21 @@ Resolve the project name with this fallback chain:
 3. The working directory basename, when not in a git repo
 
 The name must match the workspace directory under `$OACP_HOME/projects/`
-byte-for-byte — the store path segment is case-sensitive and is validated
-against that same rule.
+byte-for-byte — the store path segment is case-sensitive. The writer checks
+segment syntax, not workspace existence: confirm a missing workspace mapping
+before publishing unless a repository memory binding establishes the project.
+
+If the main repository has an `.agent-memory.json` binding, resolve its project
+and home before publication. An ambient `AGENT_MEMORY_HOME` or `OACP_HOME` can
+override that binding in the CLI; inspect it with
+`env -u AGENT_MEMORY_HOME -u OACP_HOME agent-memory status`, or read the exact
+binding file and resolve its home. The binding supplies the project without a
+new confirmation. Do not infer this project from the task worktree's name.
+
+Set `MEMORY_HOME` once to the binding's resolved home, otherwise to
+`${OACP_HOME:-$HOME/oacp}`. Use this same value for ruling lookup, publication,
+event curation, optional initialization, and doctor. The bound home must be
+writable before publication; retain the draft if it is unavailable.
 
 ### 2. Collect the session identity
 
@@ -58,7 +78,8 @@ The writer needs five identity values. Gather them before composing the body:
   every retry. This is what distinguishes multiple sessions by the same agent
   on the same day. If the session keeps working after a debrief has already
   landed, use the derived continuation id described in step 8 instead.
-- **`--started-utc` / `--ended-utc`** — session bounds as ISO 8601 UTC, e.g.
+- **`--started-utc` / `--ended-utc`** — session bounds as ISO 8601 UTC with
+  whole seconds, e.g.
   `2026-08-25T20:04:11Z`. Take these from the clock, never from an estimate;
   `ended_utc` must not precede `started_utc`, and the date of `started_utc`
   determines the filename and directory segments.
@@ -78,14 +99,14 @@ Gather what actually happened:
 - **Issues** — tickets created, closed, or updated. If other agents
   collaborated (parallel runs, review loops), include their closures and PR
   activity; local `git log` alone misses them.
-- **Files changed** — `git diff --name-only HEAD~5..HEAD 2>/dev/null` or
-  `git status --short`
-- **Git activity** — `git log --oneline --since="8 hours ago"`, in each repo
+- **Files changed** — `git log --name-only --format= --since="<started_utc>"`
+  plus `git status --short`
+- **Git activity** — `git log --oneline --since="<started_utc>"`, in each repo
   touched for cross-project sessions
 - **Next actions** — carry-forward items, open threads, and blockers that
-  remain live. Before restating a plan, check today's org-memory events and
-  decisions for a ruling that already supersedes it; the published record is
-  immutable.
+  remain live. Before restating a plan, check today's entries in
+  `$MEMORY_HOME/org-memory/events/` and `$MEMORY_HOME/org-memory/decisions.md`
+  for a ruling that already supersedes it; the published record is immutable.
 
 Your conversation context is the primary source. Git activity supplements it;
 it does not replace what you remember of the session.
@@ -100,7 +121,7 @@ itself, so do not write a `---` block at the top.
 # Session Summary: <project> — YYYY-MM-DD
 
 **Runtime**: codex
-**Duration**: <measured wall-clock duration from started_utc to ended_utc>
+**Duration**: ~{{DURATION}} minutes
 
 ## What Changed
 
@@ -126,6 +147,10 @@ itself, so do not write a `---` block at the top.
 
 - anything notable (omit the section if nothing)
 ```
+
+Leave `{{DURATION}}` literal. The shared writer fills it from the start/end
+stamps, rounding partial minutes up before hashing. Other placeholders remain
+unchanged.
 
 > **Use a file-writing tool, never a shell heredoc.** Shell expansion corrupts
 > debrief bodies — backticks in a double-quoted heredoc execute as command
@@ -185,11 +210,12 @@ python3 "$SKILL_DIR/scripts/write_debrief.py" \
   --started-utc "<started>" \
   --ended-utc "<ended>" \
   --body-file "<path-to-body>" \
+  --oacp-dir "${MEMORY_HOME:?resolve it in step 1}" \
   --json
 ```
 
-The writer validates the schema, computes the content hash, stages the record
-privately, publishes it with an atomic no-replace link, and reads it back to
+The writer validates the schema, fills `{{DURATION}}`, computes the content
+hash, stages privately, publishes with an atomic no-replace link, and reads back to
 confirm. Exit codes: `0` published (or an idempotent re-publish of a
 byte-identical record), `1` validation error, `2` publication failure.
 
@@ -198,7 +224,8 @@ verified record. On any failure the path stays absent; at worst a private
 `.stage.*` file remains, and a later successful publication of the same record
 sweeps it. The writer only ever publishes an inode it created itself, so a
 `.stage.*` file that appears from anywhere else is never adopted —
-`oacp doctor` reports it and it is safe to delete by hand.
+`agent-memory doctor --home "${MEMORY_HOME:?resolve it in step 1}"` reports it
+and it is safe to delete by hand.
 
 ### 8. Handle a collision
 
@@ -233,7 +260,9 @@ the session produced an outcome other agents or projects need, write it as a
 separate event:
 
 ```bash
-oacp write-event --type decision --project "<project>" --agent codex ...
+agent-memory event write --home "${MEMORY_HOME:?resolve it in step 1}" \
+  --type decision --project "<project>" --agent codex --slug "<slug>" \
+  --source-ref "<YYYYMMDD>-codex-<session>" --body-file "<path-to-event-body>"
 ```
 
 Set the event's `source_ref` to the debrief filename stem
@@ -241,13 +270,15 @@ Set the event's `source_ref` to the debrief filename stem
 
 ## Notes
 
-- Keep it concise — 2-6 bullets per section. If the session was trivial, say
-  so rather than padding.
+- Keep each section to the facts a later reader needs. If the session was
+  trivial, say so rather than padding.
 - Facts over narrative: the store is read by curation tooling, not for prose.
 - Debrief files are never auto-loaded at session start; they are permanent
   history, not context.
 - The store does **not** have to exist first — the writer provisions its own
-  tree. `oacp org-memory init` is a convenience, never a precondition.
-- `oacp doctor` validates store *setup* — layout, staging artifacts, symlinks.
+  tree. `agent-memory org init --home "${MEMORY_HOME:?resolve it in step 1}"`
+  is optional setup.
+- `agent-memory doctor --home "${MEMORY_HOME:?resolve it in step 1}"` validates
+  store *setup* — layout, staging artifacts, symlinks.
   It never opens debrief files; schema and hash correctness are the writer's
   contract, verified at publication.

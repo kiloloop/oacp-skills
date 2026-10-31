@@ -1,6 +1,11 @@
+"""Verdict fixtures use realistic formats and synthetic names and content."""
+
 from __future__ import annotations
 
 import importlib.util
+import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -16,15 +21,21 @@ SPEC.loader.exec_module(validate_verdict)
 
 
 HEAD = "0123456789abcdef0123456789abcdef01234567"
+COMMON_BODY_KEYS = [
+    "quality_gate_result",
+    "merge_ready",
+    "validated_head",
+    "nits",
+]
 
 
 def base_verdict():
     return {
-        "packet_id": "20260101_example_codex_r1",
+        "packet_id": "20260807_example_codex_r1",
         "source_review_packet": "",
         "reviewer": "codex",
         "round": 1,
-        "created_at_utc": "2026-01-01T00:00:00Z",
+        "created_at_utc": "2026-08-07T20:00:00Z",
         "reviewed_head": HEAD,
         "summary": "Review completed.",
         "findings": [],
@@ -61,7 +72,52 @@ class ValidateVerdictTests(unittest.TestCase):
         )
         self.assertTrue(result["gate_passed"])
         self.assertEqual(result["message_type"], "review_lgtm")
+        self.assertEqual(list(result["body"])[:4], COMMON_BODY_KEYS)
+        self.assertEqual(result["body"]["quality_gate_result"], "pass")
+        self.assertTrue(result["body"]["merge_ready"])
         self.assertEqual(result["body"]["validated_head"], HEAD)
+        self.assertEqual(result["body"]["nits"], [])
+        self.assertEqual(result["body"]["withheld_side_effects"], [])
+
+    def test_withheld_approval_preserves_terminal_quality_verdict(self) -> None:
+        for failing in (False, True):
+            with self.subTest(failing=failing):
+                data = base_verdict()
+                data["withheld_side_effects"] = ["submits_github_review", "comments_on_github"]
+                if failing:
+                    data["findings"] = [finding()]
+                result = validate_verdict.normalize_verdict(
+                    data, findings_ref="packets/findings/result.yaml"
+                )
+                self.assertEqual(result["message_type"], "review_feedback" if failing else "review_lgtm")
+                self.assertEqual(result["body"]["withheld_side_effects"], data["withheld_side_effects"])
+                self.assertIs(result["body"]["merge_ready"], not failing)
+
+    def test_withheld_effects_reject_invalid_or_ambiguous_values(self) -> None:
+        for value in (None, "comments_on_github", [True], ["submit_github_review"],
+                      ["comments_on_github", "comments_on_github"]):
+            with self.subTest(value=value):
+                data = base_verdict()
+                data["withheld_side_effects"] = value
+                with self.assertRaisesRegex(validate_verdict.VerdictError, "withheld_side_effects"):
+                    validate_verdict.normalize_verdict(data, findings_ref="packets/findings/result.yaml")
+
+    def test_cli_renders_withheld_effect_in_signed_reply_body_input(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            verdict = root / "verdict.json"
+            data = base_verdict()
+            data["withheld_side_effects"] = ["submits_github_review"]
+            verdict.write_text(json.dumps(data))
+            packet, body = root / "packet.yaml", root / "body.yaml"
+            result = subprocess.run([sys.executable, str(SCRIPT), str(verdict),
+                                     "--findings-ref", "packets/findings/result.yaml",
+                                     "--packet", str(packet), "--body", str(body)],
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            rendered = yaml.safe_load(body.read_text())
+            self.assertEqual(rendered["withheld_side_effects"], ["submits_github_review"])
+            self.assertTrue(rendered["merge_ready"])
 
     def test_nonblocking_finding_requires_structured_nit(self) -> None:
         data = base_verdict()
@@ -86,6 +142,38 @@ class ValidateVerdictTests(unittest.TestCase):
             data, findings_ref="packets/findings/result.yaml"
         )
         self.assertTrue(result["gate_passed"])
+
+    def test_findings_status_matrix(self) -> None:
+        # Realistic finding format; names and fixture values are synthetic.
+        statuses = (
+            "fixed", "wont_fix", "open", "not_fixed", "needs_clarification",
+            "deferred", "unknown", "addressed", "resolved", "withdrawn",
+        )
+        for severity, blocking in (
+            ("P0", True), ("P1", True), ("P2", True),
+            ("P2", False), ("P3", False),
+        ):
+            for finding_status in statuses:
+                with self.subTest(
+                    severity=severity, blocking=blocking, status=finding_status
+                ):
+                    data = base_verdict()
+                    row = finding(severity=severity, blocking=blocking)
+                    row["status"] = finding_status
+                    data["findings"] = [row]
+                    result = validate_verdict.normalize_verdict(
+                        data, findings_ref="packets/findings/result.yaml"
+                    )
+                    resolved = finding_status in {"fixed", "wont_fix"}
+                    self.assertEqual(result["gate_passed"], resolved)
+                    self.assertEqual(
+                        result["unresolved_blocking"],
+                        [] if resolved or not blocking else ["F-001"],
+                    )
+                    self.assertEqual(
+                        result["missing_nits"],
+                        [] if resolved or blocking else ["F-001"],
+                    )
 
     def test_p1_cannot_be_marked_nonblocking(self) -> None:
         data = base_verdict()
@@ -127,6 +215,11 @@ class ValidateVerdictTests(unittest.TestCase):
         )
         self.assertFalse(result["gate_passed"])
         self.assertEqual(result["message_type"], "review_feedback")
+        self.assertEqual(list(result["body"])[:4], COMMON_BODY_KEYS)
+        self.assertEqual(result["body"]["quality_gate_result"], "fail")
+        self.assertFalse(result["body"]["merge_ready"])
+        self.assertEqual(result["body"]["validated_head"], HEAD)
+        self.assertEqual(result["body"]["nits"], [])
 
     def test_budget_escalation_forces_feedback(self) -> None:
         data = base_verdict()

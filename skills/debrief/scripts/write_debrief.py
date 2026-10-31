@@ -133,6 +133,24 @@ def valid_project_segment(name: str) -> bool:
     )
 
 
+DURATION_PLACEHOLDER = b"{{DURATION}}"
+
+
+def fill_placeholders(body: bytes, started: dt.datetime, ended: dt.datetime) -> bytes:
+    """Replace ``{{DURATION}}`` with the whole minutes between the two stamps.
+
+    The body is composed before the end stamp exists, so a hand-written
+    duration is a projection. The writer holds both stamps, so it fills the
+    figure at publish time, rounding up: ``ceil((ended - started) / 60)``.
+    The substituted body is what gets hashed and published. A body without
+    the placeholder is returned unchanged.
+    """
+    if DURATION_PLACEHOLDER not in body:
+        return body
+    minutes = -(-int((ended - started).total_seconds()) // 60)
+    return body.replace(DURATION_PLACEHOLDER, str(minutes).encode("ascii"))
+
+
 def parse_utc(label: str, value: str) -> dt.datetime:
     """Parse an ISO 8601 UTC timestamp that ends in ``Z``."""
     if not value.endswith("Z"):
@@ -706,6 +724,7 @@ def write_debrief(
         raise WriterError(
             f"ended_utc ({ended_utc}) is before started_utc ({started_utc})", 1
         )
+    body = fill_placeholders(body, started, ended)
     validate_body(body)
 
     record = compose_record(

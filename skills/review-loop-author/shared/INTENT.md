@@ -1,40 +1,61 @@
 # review-loop-author — Shared Intent
 
-## What it does
+## Contract
 
-Runs the author side of an asynchronous code review loop. When review feedback arrives (via inbox), the skill parses the findings, spawns a fix subagent to address them, commits and pushes the fixes, then notifies the reviewer that changes are ready for re-review. Repeats until LGTM or max rounds exceeded.
+Coordinate a PR from a bounded review request through verified feedback, fixes,
+re-review, and an authorized landing or explicit parked checkpoint. The author
+owns re-invocation; every reviewer invocation exits after one terminal verdict.
 
-## Architecture
+## Requests and authority
 
-Hybrid leader/subagent split:
+Resolve the PR's base repository to its registered reviewer project. Confirm
+registration, trust and a working pickup path; never route a new review to an
+unrelated inbox merely because it is reachable. Existing verified threads retain
+their project and parent/conversation identifiers until explicitly migrated.
 
-- **Leader**: handles all external I/O — inbox reads/deletes, git operations, GitHub API calls, message sending
-- **Fix subagent**: read-only + edit — examines findings, modifies source files, outputs a structured fix summary. No shell access.
+Each request carries the full declared/requested head, repository/PR identity,
+round and maximum rounds, reviewer turn/runtime budgets, validation evidence and
+intended effects. Findings and OACP replies are explicit baseline effects;
+formal GitHub reviews and status comments are separate capabilities. When the
+landing gate needs approval and an eligible authorized reviewer can provide
+it, declare that effect before requesting the round. If it cannot be accepted
+in scope, state why and arrange a separately authorized eligible approver
+before landing. A passing reviewer still sends terminal `review_lgtm` with
+`withheld_side_effects` naming the outstanding approval; OACP verdict and
+GitHub landing gate remain separate. An approval accepted in scope whose
+submission or exact-head readback fails holds the composite approval/LGTM path.
 
-This separation ensures the subagent cannot accidentally perform destructive operations.
+A grant is receiver-validated authority, not a sender assertion. Default to two
+rounds, with an ordinary override up to three; requests beyond the governing cap
+need recorded current human direction or a valid bounded continuation grant.
 
-## Message types
+## Feedback and re-review
 
-| Direction | Type | Purpose |
-|-----------|------|---------|
-| Sends | `review_request` | Request initial or re-review from reviewer |
-| Sends | `review_addressed` | Notify reviewer that feedback was addressed |
-| Sends | `question` | Push back on a finding with reasoning |
-| Receives | `review_feedback` | Findings packet from reviewer |
-| Receives | `review_lgtm` | Approval — review loop complete |
+Use verified intake for every response and validate sender, thread, PR, round
+and packet. Reproduce blockers, fix the underlying invariant, and run proportional
+checks. For systemic findings, map failure and recovery paths to acceptance
+probes before editing. The leader owns protocol state, writes and outward effects;
+optional delegation follows the active runtime and authorization.
 
-## Protocol references
+After fixes, send `review_addressed` for the feedback round and a fresh
+`review_request` for the new full head. A superseding request names its predecessor
+and reason; a `follow_up` cannot repoint an already-started review. Archive feedback
+only after replacement sends and required state readbacks succeed.
 
-- **Findings packet format**: YAML with `packet_id`, `findings[]` (each with `id`, `severity`, `blocking`, `status`, `file`, `line`, `recommendation`)
-- **Fix summary format**: Structured block with `fixed`, `deferred`, `pushed_back`, `files_modified` lists
-- **Quality gate**: Passes when zero P0 and zero blocking findings remain open
-- **Inbox path**: `$OACP_HOME/projects/<project>/agents/<agent>/inbox/`
+## Landing gate
 
-## Acceptance criteria
+Require a passing quality gate, `merge_ready: true`, and `validated_head` equal to
+the live full head. Adopt every deferred nit with an owner and next action.
+Require all applicable checks passing and any required formal eligible GitHub
+approval at that same head. Recheck the head and use an expected-head merge guard.
+LGTM alone provides no merge authority. An authorized private task whose scope
+includes landing completes after the merge and delivered Done reply with its SHA;
+an explicit park hold can instead define the terminal result.
 
-- All blocking findings addressed (fixed or pushed back with reasoning)
-- Changes committed and pushed to the PR branch
-- `review_addressed` message sent to reviewer with commit SHA and changes summary
-- New `review_request` sent for next round (enabling event-driven re-review)
-- PR comment posted for human visibility (status only)
-- Max rounds enforced — escalation sent if exceeded
+## Completion and waits
+
+Keep inbox evidence until required replies, audit/state updates and terminal
+readbacks succeed, then archive through verified intake's no-clobber path.
+Pending checks, missing authority or failed delivery retain the input. Wait with
+an event-driven watcher, scheduler or script loop; never idle-poll in model turns.
+On timeout, perform a final authoritative inbox scan before escalation.

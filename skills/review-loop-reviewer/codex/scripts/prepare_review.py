@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import argparse
-import io
 import json
 import os
 import re
-import shutil
 import subprocess
-import tarfile
+import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 
@@ -89,10 +87,6 @@ def run_text(command: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(list(command), check=False, capture_output=True, text=True)
 
 
-def run_bytes(command: Sequence[str]) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(list(command), check=False, capture_output=True)
-
-
 def gh_metadata(
     base_repo: str,
     pr: int,
@@ -142,72 +136,147 @@ def _inside(root: Path, candidate: Path) -> bool:
         return False
 
 
-def safe_extract_tar(archive: bytes, destination: Path, *, strip_first: bool) -> None:
-    if destination.exists():
-        raise ReviewPreparationError(f"review tree already exists: {destination}")
-    destination.mkdir(parents=True)
-    try:
-        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:*") as bundle:
-            members = bundle.getmembers()
-            roots = {
-                _safe_parts(member.name, strip_first=False)[0]
-                for member in members
-                if _safe_parts(member.name, strip_first=False)
-            }
-            if strip_first and len(roots) != 1:
-                raise ReviewPreparationError(
-                    "GitHub archive must have one top-level directory"
-                )
+def _git_error(completed: subprocess.CompletedProcess[bytes], fallback: str) -> str:
+    return os.fsdecode(completed.stderr).strip() or fallback
 
-            ordered = sorted(
-                members, key=lambda item: (not item.isdir(), len(item.name))
+
+def _index_entries(payload: bytes) -> list[tuple[str, str, Path]]:
+    entries: list[tuple[str, str, Path]] = []
+    seen: set[Path] = set()
+    for record in payload.split(b"\0"):
+        if not record:
+            continue
+        try:
+            metadata, raw_name = record.split(b"\t", 1)
+            raw_mode, raw_oid, raw_stage = metadata.split(b" ", 2)
+            mode = raw_mode.decode("ascii")
+            oid = raw_oid.decode("ascii")
+            stage = raw_stage.decode("ascii")
+        except (UnicodeDecodeError, ValueError) as exc:
+            raise ReviewPreparationError("invalid local Git index entry") from exc
+        if stage != "0":
+            raise ReviewPreparationError("local Git index contains unmerged entries")
+        if mode == "160000":
+            raise ReviewPreparationError(
+                "gitlink requires a separately verified recursive checkout; "
+                "this helper cannot claim a complete submodule tree"
             )
-            for member in ordered:
-                parts = _safe_parts(member.name, strip_first=strip_first)
-                if not parts:
-                    continue
-                target = destination.joinpath(*parts)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                if not _inside(destination, target.parent):
-                    raise ReviewPreparationError(
-                        f"archive escapes destination: {member.name}"
-                    )
-                if member.isdir():
-                    target.mkdir(exist_ok=True)
-                    continue
-                if target.exists() or target.is_symlink():
-                    raise ReviewPreparationError(
-                        f"duplicate archive path: {member.name}"
-                    )
-                if member.issym():
-                    link = PurePosixPath(member.linkname)
-                    if link.is_absolute() or ".." in link.parts:
-                        raise ReviewPreparationError(f"unsafe symlink: {member.name}")
-                    link_target = target.parent.joinpath(*link.parts)
-                    if not _inside(destination, link_target):
-                        raise ReviewPreparationError(
-                            f"symlink escapes destination: {member.name}"
-                        )
-                    target.symlink_to(member.linkname)
-                    continue
-                if not (member.isfile() or member.islnk()):
-                    raise ReviewPreparationError(
-                        f"unsupported archive member: {member.name}"
-                    )
-                source = bundle.extractfile(member)
-                if source is None:
-                    raise ReviewPreparationError(
-                        f"archive member has no content: {member.name}"
-                    )
-                descriptor = os.open(
-                    target, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600
-                )
-                with os.fdopen(descriptor, "wb") as handle:
-                    shutil.copyfileobj(source, handle)
-                os.chmod(target, member.mode & 0o777)
-    except Exception:
-        # Leave the bounded temp evidence in place for diagnosis; callers choose cleanup.
-        raise
+        if mode not in {"100644", "100755", "120000"}:
+            raise ReviewPreparationError(
+                f"unsupported tracked mode {mode} for exact-tree materialization"
+            )
+        name = os.fsdecode(raw_name)
+        parts = _safe_parts(name, strip_first=False)
+        if not parts:
+            raise ReviewPreparationError("local Git index contains an empty path")
+        path = Path(*parts)
+        if path in seen:
+            raise ReviewPreparationError(f"duplicate local Git path: {name}")
+        seen.add(path)
+        entries.append((mode, oid, path))
+    return entries
+
+
+def _write_batch_tree(batch, entries: list[tuple[str, str, Path]], staging: Path) -> None:
+    """Materialize raw cat-file records without checkout/export transformations."""
+    for mode, oid, path in entries:
+        header = batch.readline(1024)
+        fields = header.rstrip(b"\n").split(b" ")
+        if not header.endswith(b"\n") or len(fields) != 3:
+            raise ReviewPreparationError("malformed or missing cat-file batch header")
+        if fields[:2] != [oid.encode("ascii"), b"blob"]:
+            raise ReviewPreparationError("cat-file batch object identity or type mismatch")
+        try:
+            size = int(fields[2])
+        except ValueError as exc:
+            raise ReviewPreparationError("invalid cat-file batch size") from exc
+        if size < 0:
+            raise ReviewPreparationError("invalid cat-file batch size")
+        target = staging / path
+        if not _inside(staging, target.parent):
+            raise ReviewPreparationError(f"local Git path escapes destination: {path}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if mode == "120000":
+            payload = batch.read(size)
+            if len(payload) != size:
+                raise ReviewPreparationError("truncated cat-file batch blob")
+            link_target = os.fsdecode(payload)
+            link = PurePosixPath(link_target)
+            if not link_target or link.is_absolute() or ".." in link.parts:
+                raise ReviewPreparationError(f"unsafe symlink: {path}")
+            target.symlink_to(link_target)
+        else:
+            remaining = size
+            with target.open("xb") as output:
+                while remaining:
+                    chunk = batch.read(min(remaining, 1024 * 1024))
+                    if not chunk:
+                        raise ReviewPreparationError("truncated cat-file batch blob")
+                    output.write(chunk)
+                    remaining -= len(chunk)
+            target.chmod(0o755 if mode == "100755" else 0o644)
+        if batch.read(1) != b"\n":
+            raise ReviewPreparationError("missing cat-file batch blob separator")
+    if batch.read(1):
+        raise ReviewPreparationError("unexpected extra cat-file batch records")
+
+
+def _materialize_local_git_tree(
+    *, head: str, repo_root: Path, destination: Path
+) -> None:
+    repo_root = repo_root.resolve()
+    destination = destination.absolute()
+    if destination.exists() or destination.is_symlink():
+        raise ReviewPreparationError(f"review tree already exists: {destination}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(
+        prefix=f".{destination.name}.", dir=destination.parent
+    ) as temporary:
+        scratch = Path(temporary)
+        staging = scratch / "tree"
+        staging.mkdir()
+        environment = os.environ.copy()
+        environment["GIT_INDEX_FILE"] = str(scratch / "index")
+        git = ["git", "-C", str(repo_root)]
+
+        read_tree = subprocess.run(
+            [*git, "read-tree", head],
+            check=False,
+            capture_output=True,
+            env=environment,
+        )
+        if read_tree.returncode != 0:
+            raise ReviewPreparationError(_git_error(read_tree, "git read-tree failed"))
+        listed = subprocess.run(
+            [*git, "ls-files", "--stage", "-z"],
+            check=False,
+            capture_output=True,
+            env=environment,
+        )
+        if listed.returncode != 0:
+            raise ReviewPreparationError(_git_error(listed, "git ls-files failed"))
+        entries = _index_entries(listed.stdout)
+
+        # One batch process avoids per-file startup costs. Spool its output to
+        # disk so a large tree does not require buffering every blob in memory.
+        with (scratch / "blobs.batch").open("w+b") as batch:
+            blobs = subprocess.run(
+                [*git, "cat-file", "--batch"],
+                input=b"".join(oid.encode("ascii") + b"\n" for _, oid, _ in entries),
+                stdout=batch,
+                stderr=subprocess.PIPE,
+                check=False,
+                env=environment,
+            )
+            if blobs.returncode != 0:
+                raise ReviewPreparationError(_git_error(blobs, "git cat-file batch failed"))
+            batch.seek(0)
+            _write_batch_tree(batch, entries, staging)
+
+        if destination.exists() or destination.is_symlink():
+            raise ReviewPreparationError(f"review tree already exists: {destination}")
+        staging.replace(destination)
 
 
 def materialize_exact_tree(
@@ -216,25 +285,28 @@ def materialize_exact_tree(
     head_repo: str,
     base_repo: str,
     destination: Path,
+    repo_root: Path | None = None,
     text_runner: Callable[[Sequence[str]], subprocess.CompletedProcess[str]] = run_text,
-    bytes_runner: Callable[
-        [Sequence[str]], subprocess.CompletedProcess[bytes]
-    ] = run_bytes,
 ) -> str:
-    exists = text_runner(["git", "cat-file", "-e", f"{head}^{{commit}}"])
-    if exists.returncode == 0:
-        archived = bytes_runner(["git", "archive", "--format=tar", head])
-        if archived.returncode == 0:
-            safe_extract_tar(archived.stdout, destination, strip_first=False)
+    if repo_root is None:
+        discovered = text_runner(["git", "rev-parse", "--show-toplevel"])
+        repo_root = (
+            Path(discovered.stdout.strip()) if discovered.returncode == 0 else None
+        )
+    if repo_root is not None:
+        exists = text_runner(
+            ["git", "-C", str(repo_root), "cat-file", "-e", f"{head}^{{commit}}"]
+        )
+        if exists.returncode == 0:
+            _materialize_local_git_tree(
+                head=head, repo_root=repo_root, destination=destination
+            )
             return "local_git"
 
-    for repo in dict.fromkeys([head_repo, base_repo]):
-        archived = bytes_runner(["gh", "api", f"repos/{repo}/tarball/{head}"])
-        if archived.returncode == 0:
-            safe_extract_tar(archived.stdout, destination, strip_first=True)
-            return f"github:{repo}"
     raise ReviewPreparationError(
-        "unable to materialize exact head from local Git or GitHub"
+        "exact head is unavailable in local Git; fetch the full base/fork head "
+        "using the consuming repository's authorized Git identity and retry. "
+        "Archive fallback is disabled because export attributes can change it"
     )
 
 
@@ -245,6 +317,7 @@ def prepare_review(
     expected_head: str | None,
     output_dir: Path | None,
     dry_run: bool,
+    repo_root: Path | None = None,
     metadata_reader: Callable[[str, int], dict[str, Any]] = gh_metadata,
     diff_reader: Callable[[str, int], str] = gh_diff,
     materializer: Callable[..., str] = materialize_exact_tree,
@@ -279,13 +352,14 @@ def prepare_review(
             )
 
     patch = diff_reader(base_repo, pr)
-    patch_path.write_text(patch, encoding="utf-8")
     source = materializer(
         head=first["reviewed_head"],
         head_repo=first["head_repo"],
         base_repo=first["base_repo"],
         destination=tree_dir,
+        repo_root=repo_root,
     )
+    patch_path.write_text(patch, encoding="utf-8")
     second = normalize_pr_metadata(
         metadata_reader(base_repo, pr),
         base_repo=base_repo,
@@ -312,6 +386,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--pr", required=True, type=int)
     parser.add_argument("--expected-head")
     parser.add_argument("--output-dir", type=Path)
+    parser.add_argument("--repo-root", type=Path,
+                        help="local checkout containing the exact head (default: current checkout)")
     parser.add_argument("--dry-run", action="store_true")
     return parser
 
@@ -325,6 +401,7 @@ def main() -> int:
             expected_head=args.expected_head,
             output_dir=args.output_dir,
             dry_run=args.dry_run,
+            repo_root=args.repo_root,
         )
     except ReviewPreparationError as exc:
         print(json.dumps({"status": "error", "error": str(exc)}, indent=2))

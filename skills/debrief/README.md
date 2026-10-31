@@ -4,7 +4,9 @@ Capture a structured session summary and publish it to the OACP org-memory debri
 
 ## Prerequisites
 
-- `oacp` CLI ≥ 0.4.4 — the release whose `oacp doctor` validates the debrief store's setup. The writer has no `oacp` dependency of its own and runs against any published wheel; 0.4.4 is the floor for the *check*, not for publishing.
+- `agent-memory-cli` ≥ 0.1.1 for optional initialization, `agent-memory doctor`
+  and curated events. The writer itself does not depend on either memory or OACP
+  CLI; OACP integration is tested with `>=0.5.3`.
 - Python 3.9+ for `scripts/write_debrief.py` (standard library only, no dependencies)
 
 An existing org-memory tree is *not* required — the writer provisions its own.
@@ -20,23 +22,37 @@ Both runtime slices call the same runtime-agnostic writer at
 ## Install
 
 ```bash
-# Claude Code
-mkdir -p .claude/skills/debrief/scripts
-cp skills/debrief/claude/SKILL.md .claude/skills/debrief/SKILL.md
-cp skills/debrief/scripts/write_debrief.py .claude/skills/debrief/scripts/
+# Run from the catalog clone. Use a fresh destination for a clean install.
+SKILL_SOURCE="$PWD/skills/debrief"
 
-# Codex
-mkdir -p .agents/skills/debrief/scripts
-cp skills/debrief/codex/SKILL.md .agents/skills/debrief/SKILL.md
-cp skills/debrief/scripts/write_debrief.py .agents/skills/debrief/scripts/
+# Claude Code: instructions plus every bundled runtime dependency.
+CLAUDE_DEST="$PWD/.claude/skills/debrief"
+mkdir -p "$CLAUDE_DEST"
+cp "$SKILL_SOURCE/SKILL.md" "$CLAUDE_DEST/SKILL.md"
+for resource in scripts references shared agents; do
+  if [ -d "$SKILL_SOURCE/$resource" ]; then
+    cp -R "$SKILL_SOURCE/$resource" "$CLAUDE_DEST/"
+  fi
+done
+
+# Codex: common assets first, then the Codex instructions and helpers.
+CODEX_DEST="$PWD/.agents/skills/debrief"
+mkdir -p "$CODEX_DEST"
+for resource in scripts references shared agents; do
+  if [ -d "$SKILL_SOURCE/$resource" ]; then
+    cp -R "$SKILL_SOURCE/$resource" "$CODEX_DEST/"
+  fi
+done
+cp -R "$SKILL_SOURCE/codex/." "$CODEX_DEST/"
 ```
 
-Optionally initialize the store once per OACP home. The writer creates whatever
+Resolve one `MEMORY_HOME` for the writer (`--oacp-dir`), checks and event
+publication. Optionally initialize the store once per resolved home. The writer creates whatever
 part of the tree is missing on first publish, so this is a convenience rather
 than a required step:
 
 ```bash
-oacp org-memory init
+agent-memory org init --home "$MEMORY_HOME"
 ```
 
 ## Usage
@@ -49,10 +65,10 @@ oacp org-memory init
 ## The store
 
 ```text
-$OACP_HOME/org-memory/debriefs/<project>/<YYYY>/<MM>/<YYYYMMDD>-<agent>-<session>.md
+$MEMORY_HOME/org-memory/debriefs/<project>/<YYYY>/<MM>/<YYYYMMDD>-<agent>-<session>.md
 ```
 
-- `<project>` — workspace name, byte-for-byte as it appears under `$OACP_HOME/projects/`
+- `<project>` — workspace name, byte-for-byte as it appears under the resolved memory home's project tier
 - `<YYYY>/<MM>` — year and zero-padded month of the session start, **in UTC**, both agreeing with the filename date prefix
 - `<session>` — 1-32 lowercase alphanumerics, never hyphens (it is parsed as the substring after the final hyphen, which is what keeps hyphenated agent names unambiguous)
 
@@ -89,4 +105,4 @@ It also pins two classes nothing downstream can catch. **Staging ownership**: a 
 
 ## Curation guard
 
-Raw debriefs never enter `recent.md` or `events/` — only curated folds do. Promote durable outcomes with `oacp write-event`, setting `source_ref` to the debrief filename stem so the two reconcile.
+Raw debriefs never enter `recent.md` or `events/` — only curated folds do. Promote durable outcomes with `agent-memory event write --home "$MEMORY_HOME"`, setting `source_ref` to the debrief filename stem so the two reconcile.

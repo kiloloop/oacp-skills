@@ -130,17 +130,41 @@ def final_inbox_snapshot(
         rows = json.loads(completed.stdout or "[]")
     except json.JSONDecodeError as exc:
         return {"ok": False, "rows": None, "error": f"invalid inbox JSON: {exc}"}
-    return {"ok": True, "rows": rows, "error": None}
+    snapshot = {"ok": True, "rows": rows, "error": None}
+    try:
+        _snapshot_has_rows(snapshot)
+    except ValueError as exc:
+        return {"ok": False, "rows": None, "error": str(exc)}
+    return snapshot
 
 
 def _snapshot_has_rows(snapshot: dict[str, Any]) -> bool:
     rows = snapshot.get("rows")
     if isinstance(rows, list):
         return bool(rows)
-    if isinstance(rows, dict):
-        messages = rows.get("messages")
-        return bool(messages) if isinstance(messages, (list, dict)) else bool(rows)
-    return False
+    if not isinstance(rows, dict):
+        raise ValueError("inbox JSON must be a candidate list or a known mapping")
+    if "agents" in rows:
+        agents = rows["agents"]
+        if not isinstance(agents, list):
+            raise ValueError("inbox agents must be a list")
+        counts = []
+        for agent in agents:
+            if not isinstance(agent, dict) or not any(
+                key in agent for key in ("messages", "held_messages")
+            ):
+                raise ValueError("inbox agent has no candidate collections")
+            present = False
+            for key in ("messages", "held_messages"):
+                if key in agent:
+                    if not isinstance(agent[key], (list, dict)):
+                        raise ValueError(f"inbox {key} must be a candidate collection")
+                    present = present or bool(agent[key])
+            counts.append(present)
+        return any(counts)
+    if "messages" in rows and isinstance(rows["messages"], (list, dict)):
+        return bool(rows["messages"])
+    raise ValueError("unrecognized inbox JSON mapping")
 
 
 def direct_scan(
@@ -195,6 +219,12 @@ def wait_for_change(
         remaining = deadline - now()
         if remaining <= 0:
             snapshot = final_scan()
+            if not snapshot.get("ok"):
+                return {
+                    "status": "error", "events": [], "scans": scans,
+                    "error": snapshot.get("error") or "final inbox scan failed",
+                    "final_inbox": snapshot,
+                }, EXIT_ERROR
             return {
                 "status": "timeout",
                 "events": [],

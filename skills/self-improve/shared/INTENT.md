@@ -26,12 +26,12 @@ Structured review of the agent's configuration and knowledge layer. Identifies s
 ## Workflow
 
 1. **Parse target** — determine scope from argument (all, skills, memory, config, or a specific skill name)
-2. **Discover files** — build inventory of all files to review based on scope
+2. **Discover files** — classify authored sources, installed copies, symlinks and generated state; verify source → discovery → caller → observed behavior
 3. **Analyze** — check each file against the analysis checklist for its category
 4. **Report findings** — present findings grouped by category, sorted by severity
 5. **Propose changes** — suggest specific edits for each finding
-6. **Apply approved changes** — make edits after user approval
-7. **Commit** — group changes by repo and commit separately
+6. **Apply approved changes** — reuse matching authorization, edit the owning source, and rerun the specific before/after acceptance probe
+7. **Publish** — group by owning repository and publish only within authorized scope; explain any remaining source-to-runtime drift
 
 ## Analysis checklist — Skills
 
@@ -104,7 +104,17 @@ Group clusters of routine findings under a single summary line to keep the repor
 
 - All targets in scope are reviewed
 - Findings reported with severity tags and specific file/line references
-- Changes gated on user approval — no edits without consent
+- Changes stay within explicit approval; reuse matching approved scope and ask only for uncovered edits or effects
 - Commits grouped by repo (not mixed across repos)
-- Non-git-tracked files (runtime memory) are edited in place, not committed
+- Generated runtime memory is read-only; edit only authorized authored memory through its supported owner/locking mechanism
 - Deferred findings routed to appropriate follow-up (session debrief or issue tracker)
+
+## Operating bounds
+
+Use session-delta review by default after a recent full audit. Check relevant
+standing rules before proposing a change, and count distinct user corrections
+rather than repeated copies of one instruction as friction evidence. Runtime
+pass markers or deterministic helpers may suppress duplicate work without
+suppressing new evidence. Search explicit relevant paths; do not scan credential
+stores or unrelated session transcripts. Cross-runtime files remain subject to
+their owner and compatibility policy.

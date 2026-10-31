@@ -5,12 +5,12 @@ description: Use the OACP CLI and protocol from Codex to coordinate agents throu
 
 # OACP
 
-Run this version gate first. If `oacp` is missing or older than `0.4.2`, stop
+Run this version gate first. If `oacp` is missing or older than `0.5.3`, stop
 and tell the user to install or upgrade `oacp-cli[crypto]` before continuing.
 
 ```bash
 if ! command -v oacp >/dev/null 2>&1; then
-  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.4.2'" >&2
+  echo "oacp CLI not found; install 'oacp-cli[crypto]>=0.5.3'" >&2
   exit 1
 fi
 
@@ -25,12 +25,12 @@ match = re.search(r"(\d+)\.(\d+)\.(\d+)", version)
 if not match:
     raise SystemExit(f"could not parse oacp version: {version}")
 parts = tuple(int(part) for part in match.groups())
-if parts < (0, 4, 2):
-    raise SystemExit(f"oacp {version} is older than required 0.4.2")
+if parts < (0, 5, 3):
+    raise SystemExit(f"oacp {version} is older than required 0.5.3")
 PY
 ```
 
-Install or upgrade with `pip install --upgrade 'oacp-cli[crypto]>=0.4.2'`
+Install or upgrade with `pip install --upgrade 'oacp-cli[crypto]>=0.5.3'`
 (or `uv tool install --upgrade 'oacp-cli[crypto]'`). The crypto extra enables
 message signing, verification, and trust checks used by the coordination
 skills.
@@ -78,8 +78,23 @@ Run health checks before substantial coordination work:
 oacp doctor --project "${PROJECT}" --oacp-dir "${OACP_ROOT}" --json
 ```
 
-If the project uses memory sync, run `oacp memory pull` before relying on
-shared memory and `oacp memory push` after intentional memory updates.
+Memory sync requires the separate `agent-memory` CLI (`agent-memory-cli`).
+If it is unavailable, report the missing prerequisite and treat shared-memory
+freshness as unknown. When current shared facts are needed, pull on demand:
+
+```bash
+agent-memory pull --home "${OACP_ROOT}"
+```
+
+After intentional memory updates, publish only within an authorized wrap-up
+or an explicit publication grant:
+
+```bash
+agent-memory push --home "${OACP_ROOT}"
+```
+
+Keep the existing home and runtime startup policy. These commands do not
+require `agent-memory setup codex` or a change to session hooks.
 
 ## Read
 
@@ -161,14 +176,14 @@ subscribers is expected, so confirm the file still exists before processing.
 Use `--show-archived` only when archive events are part of the task; it is noisy
 when watching your own inbox.
 
-## Signing and trust (v0.4.2+)
+## Signing and trust (v0.5.3+)
 
 OACP messages may carry a detached-JWS Ed25519 auth trailer. Signing is
 sender-controlled; verification posture is receiver-controlled:
 
 ```bash
-oacp key gen --agent codex --oacp-dir "${OACP_ROOT}"
-oacp key list --agent codex --oacp-dir "${OACP_ROOT}"
+oacp trust keygen --agent codex --oacp-dir "${OACP_ROOT}"
+oacp trust keys --agent codex --oacp-dir "${OACP_ROOT}"
 oacp trust import <kid>.pub.json --project "${PROJECT}" --agent codex \
   --oacp-dir "${OACP_ROOT}"
 oacp trust list --project "${PROJECT}" --oacp-dir "${OACP_ROOT}"

@@ -5,6 +5,43 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/),
 and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] - 2026-10-30
+
+### Added
+
+- Claude inbox processing ships a helper that pins its wrapper scripts as envelope trusted scripts ([check-inbox](skills/check-inbox/)).
+- Claude review requests quote diff sizes and lockfile compares measured by bundled scripts ([review-loop-author](skills/review-loop-author/)).
+
+### Changed
+
+- **Breaking:** `check-inbox` requires oacp-cli >=0.5.4; `oacp`, `debrief`, `wrap-up` and both review-loop skills require >=0.5.3 ([prerequisites](README.md#prerequisites)).
+- The OACP primer uses the grouped `oacp agent add` and `oacp trust keygen` / `keys` commands ([oacp](skills/oacp/)).
+- Claude Done finalization stamps the session's runtime model and effort when the caller passes none ([check-inbox](skills/check-inbox/)).
+- Claude Done replies report whose envelope is still active and print the standalone clear for this task's ([check-inbox](skills/check-inbox/)).
+- Claude review authors merge on LGTM when the dispatched task's admission approved the merge ([review-loop-author](skills/review-loop-author/)).
+- **Breaking:** Claude review-loop skills drop `--poll` and `--timeout` for one-round runs woken by an `oacp watch` Monitor ([review-loop-author](skills/review-loop-author/)).
+- Claude inbox processing uses the packaged autonomy evaluator and canonical terminal audit commands ([check-inbox](skills/check-inbox/)).
+- Claude inbox processing delegates review-lifecycle messages to their consuming review skill ([check-inbox](skills/check-inbox/)).
+- Gate-paused Claude tasks require human confirmation ([check-inbox](skills/check-inbox/)).
+- Claude reviewers validate findings packets and reply bodies; only `fixed` or `wont_fix` resolve a finding ([review-loop-reviewer](skills/review-loop-reviewer/)).
+- Claude review workflows merge a stacked PR's parent without `--delete-branch`, so the child stays open ([review-loop-author](skills/review-loop-author/)).
+- Claude guidance audits record repeat passes under the memory home ([self-improve](skills/self-improve/)).
+- Claude guidance audits check proposals against standing org-memory rules ([self-improve](skills/self-improve/)).
+- Claude wrap-up publishes org-memory events and syncs through agent-memory ([wrap-up](skills/wrap-up/)).
+- Branch cleanup reserves peer runtime namespaces with `--keep-prefix` ([wrap-up](skills/wrap-up/)).
+- Session summaries fill the duration placeholder before hashing in both runtimes ([debrief](skills/debrief/)).
+- Codex inbox processing supports bounded admission through terminal archival ([check-inbox](skills/check-inbox/)).
+- Codex review workflows require formal approval at the reviewed head on gated repositories ([review-loop-author](skills/review-loop-author/)).
+- Codex guidance audits reuse existing scope approval ([self-improve](skills/self-improve/)).
+- Codex wrap-up previews cleanup through a bundled advisory helper ([wrap-up](skills/wrap-up/)).
+- Codex session summaries use one resolved memory home ([debrief](skills/debrief/)).
+- Installation copies complete skill resources for each runtime ([installation](README.md#installation)).
+- Org-memory setup and event writes use `agent-memory` commands; oacp-cli no longer ships memory commands ([oacp](skills/oacp/)).
+
+### Fixed
+
+- Claude inbox expiry reads the protocol's `expires_at` field ([check-inbox](skills/check-inbox/)).
+
 ## [0.7.0] - 2026-08-28
 
 ### Added
@@ -105,6 +142,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Skill template for contributing new skills
 - CI validation workflow (skill.yaml schema, SKILL.md frontmatter, absolute path check)
 
+[0.8.0]: https://github.com/kiloloop/oacp-skills/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/kiloloop/oacp-skills/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/kiloloop/oacp-skills/compare/v0.5.2...v0.6.0
 [0.5.2]: https://github.com/kiloloop/oacp-skills/compare/v0.5.1...v0.5.2

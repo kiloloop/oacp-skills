@@ -8,10 +8,11 @@
 #
 # Usage:
 #   bash cleanup_branches.sh [repo-root] [--base <branch>] [--keep <branch>]...
-#   bash cleanup_branches.sh [repo-root] --dry-run [other options]
+#                            [--keep-prefix <prefix>]... [--dry-run]
 #
-# The caller must establish the repository-authorized GitHub identity before
-# running the script. Remote branches are never deleted.
+# --keep-prefix reserves a branch namespace (e.g. a peer runtime's "codex/") in
+# both passes. The caller must establish the repository-authorized GitHub
+# identity before running the script. Remote branches are never deleted.
 
 set -u
 
@@ -19,6 +20,7 @@ REPO_ROOT="."
 BASE_BRANCH=""
 DRY_RUN=0
 KEEP_BRANCHES=()
+KEEP_PREFIXES=()
 POSITIONAL_SEEN=0
 
 while [ "$#" -gt 0 ]; do
@@ -33,12 +35,17 @@ while [ "$#" -gt 0 ]; do
       KEEP_BRANCHES+=("$2")
       shift 2
       ;;
+    --keep-prefix)
+      [ "$#" -ge 2 ] || { echo "ERROR: --keep-prefix requires a prefix" >&2; exit 2; }
+      KEEP_PREFIXES+=("$2")
+      shift 2
+      ;;
     --dry-run)
       DRY_RUN=1
       shift
       ;;
     --help|-h)
-      sed -n '2,14p' "$0"
+      sed -n '2,15p' "$0"
       exit 0
       ;;
     -*)
@@ -73,14 +80,32 @@ git rev-parse --verify "$BASE_REF^{commit}" >/dev/null 2>&1 || {
   exit 1
 }
 
-should_keep() {
+# Prints why a branch is reserved and returns 0, or returns 1 when it is not.
+keep_reason() {
   local candidate="$1"
   local kept
-  [ "$candidate" = "$BASE_BRANCH" ] && return 0
-  [ "${#KEEP_BRANCHES[@]}" -eq 0 ] && return 1
-  for kept in "${KEEP_BRANCHES[@]}"; do
-    [ "$candidate" = "$kept" ] && return 0
-  done
+  if [ "$candidate" = "$BASE_BRANCH" ]; then
+    echo "base branch"
+    return 0
+  fi
+  if [ "${#KEEP_BRANCHES[@]}" -gt 0 ]; then
+    for kept in "${KEEP_BRANCHES[@]}"; do
+      if [ "$candidate" = "$kept" ]; then
+        echo "persistent branch"
+        return 0
+      fi
+    done
+  fi
+  if [ "${#KEEP_PREFIXES[@]}" -gt 0 ]; then
+    for kept in "${KEEP_PREFIXES[@]}"; do
+      case "$candidate" in
+        "$kept"*)
+          echo "reserved prefix $kept"
+          return 0
+          ;;
+      esac
+    done
+  fi
   return 1
 }
 
@@ -96,7 +121,11 @@ delete_or_preview() {
     return 0
   fi
   if [ "$kind" = "ancestry" ]; then
-    git branch -d "$branch" && echo "pruned (ancestry): $branch"
+    # -D, not -d: `--merged <base>` already proved the tip is reachable from the
+    # base, so nothing can be lost. -d additionally demands containment in HEAD
+    # or the branch's upstream, which fails when run from a worktree on another
+    # branch or when the upstream is stale.
+    git branch -D "$branch" && echo "pruned (ancestry): $branch"
   else
     git branch -D "$branch" &&
       echo "pruned (squash-merged, tip == merged PR head): $branch"
@@ -106,8 +135,8 @@ delete_or_preview() {
 # Pass 1 — regular / fast-forward ancestry.
 while IFS= read -r branch; do
   [ -n "$branch" ] || continue
-  if should_keep "$branch"; then
-    echo "KEEP $branch — base or persistent branch"
+  if reason="$(keep_reason "$branch")"; then
+    echo "KEEP $branch — $reason"
     continue
   fi
   worktree_path="$(checked_out_path "$branch")"
@@ -121,20 +150,29 @@ done < <(git branch --format='%(refname:short)' --merged "$BASE_REF")
 # Pass 2 — squash merges, guarded by exact merged PR head identity.
 REPO="$(gh repo view --json nameWithOwner --jq .nameWithOwner 2>/dev/null)"
 if [ -z "$REPO" ]; then
-  echo "SKIP pass 2 — gh cannot resolve this repository with the authorized identity"
+  # Surface gh's own error: a swallowed TLS failure reads as a token problem.
+  gh_err="$(gh repo view --json nameWithOwner 2>&1 >/dev/null)"
+  echo "SKIP pass 2 — gh cannot resolve this repository with the authorized identity. gh said:"
+  printf '%s\n' "${gh_err:-<no output>}" | sed 's/^/    /'
+  case "$gh_err" in
+    *x509*|*"failed to verify certificate"*|*OSStatus*)
+      echo "  -> TLS failure inside a script usually means a sandboxed network path, not a bad token; re-run unsandboxed."
+      ;;
+  esac
   echo "cleanup_branches: complete"
   exit 0
 fi
 
 while IFS= read -r branch; do
   [ -n "$branch" ] || continue
-  if should_keep "$branch"; then
+  if keep_reason "$branch" >/dev/null; then
     continue
   fi
   worktree_path="$(checked_out_path "$branch")"
   [ -z "$worktree_path" ] || continue
 
-  merged_head="$(gh pr list --repo "$REPO" --head "$branch" --state merged --limit 1     --json headRefOid --jq '.[0].headRefOid' 2>/dev/null)"
+  merged_head="$(gh pr list --repo "$REPO" --head "$branch" --state merged --limit 1 \
+    --json headRefOid --jq '.[0].headRefOid' 2>/dev/null)"
   if [ -z "$merged_head" ]; then
     echo "KEEP $branch — no merged PR found"
     continue

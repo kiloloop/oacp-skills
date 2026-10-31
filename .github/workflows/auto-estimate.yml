@@ -17,7 +17,7 @@ jobs:
     if: github.event.label.name == 'estimate'
     runs-on: ubuntu-latest
     steps:
-      - uses: kiloloop/agent-estimate@v0
+      - uses: kiloloop/agent-estimate@f4ad89780535c71d36d190e2c7dd227fde51312b # v0.9.0
         with:
           issues: ${{ github.event.issue.number }}
           output-mode: issue-comment

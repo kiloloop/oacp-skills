@@ -11,16 +11,16 @@ For runtime-agnostic protocol concepts (message schema, lifecycle, type semantic
 
 ## 1. Version check (run this first)
 
-Before any OACP operation, verify the CLI is installed and meets the version contract declared in `skill.yaml` (`requires_oacp: ">=0.4.2"`):
+Before any OACP operation, verify the CLI is installed and meets the version contract declared in `skill.yaml` (`requires_oacp: ">=0.5.3"`):
 
 ```bash
 oacp --version
 ```
 
-If the command is missing or the version is below `0.4.2`, fail loudly and ask the user to install or upgrade:
+If the command is missing or the version is below `0.5.3`, fail loudly and ask the user to install or upgrade:
 
 ```bash
-pip install --upgrade 'oacp-cli[crypto]>=0.4.2'   # [crypto] extra enables message signing + verification
+pip install --upgrade 'oacp-cli[crypto]>=0.5.3'   # [crypto] extra enables message signing + verification
 # or, if installed via uv:
 uv tool install --upgrade 'oacp-cli[crypto]'
 ```
@@ -46,7 +46,7 @@ oacp doctor --project <project>                # verify workspace health
 To add an agent later:
 
 ```bash
-oacp add-agent <project> <agent> --runtime <claude|codex|...>
+oacp agent add <project> <agent> --runtime <claude|codex|...>
 ```
 
 ## 3. Sending a message — the canonical workflow
@@ -162,8 +162,8 @@ Flags:
 OACP messages carry an optional detached-JWS **auth trailer** (Ed25519). Signing is opt-in per sender; verification posture is per receiver. Requires the `[crypto]` extra.
 
 ```bash
-oacp key gen --agent claude                    # generate a signing key under $OACP_HOME/keys/
-oacp key list                                  # inspect local keys
+oacp trust keygen --agent claude               # generate a signing key under $OACP_HOME/keys/
+oacp trust keys                                # inspect local keys
 oacp trust import <kid>.pub.json \
   --project my-project --agent codex           # pin claude's identity for receiver codex
 oacp trust list --project my-project           # catalog entries + receiver pins
@@ -207,15 +207,16 @@ For deeper diagnostics or interactive triage, invoke the companion `/doctor` ski
 
 ## 7. Org memory (cross-project facts)
 
-OACP supports an org-level memory layer at `$OACP_HOME/org-memory/` for facts that span projects (decisions, rules, recent events).
+OACP supports an org-level memory layer at `$OACP_HOME/org-memory/` for facts that span projects (decisions, rules, recent events). Its commands come from the separate [agent-memory-cli](https://github.com/kiloloop/agent-memory) package; oacp-cli no longer ships memory commands.
 
 ```bash
-oacp org-memory init                                                 # bootstrap org-memory
-oacp write-event --agent claude --project my-project \
-  --type decision --slug api-style --body "Use REST for public APIs" # append a structured event
+agent-memory org init --home "$OACP_HOME"                            # bootstrap org-memory
+agent-memory event write --home "$OACP_HOME" --agent claude \
+  --project my-project --type decision --slug api-style \
+  --body "Use REST for public APIs"                                   # publish a structured event
 ```
 
-Use `oacp write-event` for structured cross-project facts (decisions, incidents, releases). Use `oacp send` for agent-to-agent messages within a project. They are different primitives — don't conflate.
+Use `agent-memory event write` for structured cross-project facts (decisions, incidents, releases). Use `oacp send` for agent-to-agent messages within a project. They are different primitives — don't conflate.
 
 ## 8. Validating a message
 

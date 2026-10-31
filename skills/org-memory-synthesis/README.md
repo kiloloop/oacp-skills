@@ -10,7 +10,7 @@ See [`shared/INTENT.md`](shared/INTENT.md) for the runtime-agnostic contract, ac
 
 ## Prerequisites
 
-- An [OACP](https://github.com/kiloloop/oacp) workspace with org-memory initialized (`oacp org-memory init`).
+- An [OACP](https://github.com/kiloloop/oacp) workspace with org-memory initialized (`agent-memory org init --home "$OACP_HOME"`, from [agent-memory-cli](https://github.com/kiloloop/agent-memory)).
 - `OACP_HOME` env var pointing at the workspace (defaults to `$HOME/oacp` per the OACP CLI fallback).
 - `gh` CLI — used by audit Step 7C to verify GitHub issue status references. Optional but recommended.
 
